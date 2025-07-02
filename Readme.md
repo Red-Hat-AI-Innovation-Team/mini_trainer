@@ -4,6 +4,7 @@ MiniTrainer is a small form factor and extremely efficient training library for 
 
 ### Features:
 - [Liger Kernels](https://github.com/linkedin/Liger-Kernel/tree/908b89c4dc9bb872351887b382a1e09ca25fbe85) to minimize memory footprint by chunking the loss computation.
+- **Optional Orthogonal Subspace Learning (OSL)** via SVD-based decomposition and constrained subspace optimization for continual fine-tuning and low-rank adaptation.
 - **Automatic minibatching with high-performance LPT packing** based on the effective batch size: forget about tuning your gradient accumulation, just specify `max-tokens-per-gpu` and `batch-size` and the library will automatically divides your batches in balanced minibatches across your GPUs using numba-optimized LPT (Longest Processing Time) algorithm for optimal load balancing and speed.
 - **FullyShardedDataParallel (FSDP2)** via native PyTorch `torch.distributed.fsdp` for efficient sharding across multi-GPU settings (no accelerate).
 - **Padding-free** -- it currently only works on GPUs that support flash attention and uses the padding-free feature of the transformer library to avoid extra computation on padding tokens.
@@ -11,8 +12,9 @@ MiniTrainer is a small form factor and extremely efficient training library for 
 - **pretrain and supervised** fine tuninng tokenization schemes
 - **`jsonl` logging**, your metrics will be logged in the output directory as a jsonl that can easily be processed for plotting, wandb or whatever you like for experiment tracking.
 
-### 🔥 What's New (June-17-2025) - High-Performance Batch Packing
+### 🔥 What's New (July-02-2025) - High-Performance Batch Packing
 
+- **Orthogonal Subspace Learning (OSL)** mode: allows fine-tuning in a parameter-efficient low-rank subspace while freezing parts of the core model that need to be preserved for continual learning scenarios. Controlled via `--orthogonal-subspace-learning` flag.
 - **Numba-Optimized LPT Batch Packing**: Implemented high-performance LPT (Longest Processing Time) algorithm with JIT compilation for optimal load balancing across GPUs. Achieves 3.5x better speed than greedy while providing up to 217% better load balance, 60-89% lower variance, and 33% fewer minibatches.
 - **Comprehensive test suite**: Added extensive testing framework in `tests/` folder with realistic outlier scenarios and performance benchmarks.
 
@@ -69,6 +71,7 @@ all training parameters can be found in [train.py](./train.py). Make sure to use
 
 ```shell
 torchrun --nnodes=1 --nproc-per-node=7 train.py \
+        --orthogonal-subspace-learning \
         --output-dir /new_data/aldo/balrog_test \
         --data-path ./tokenized_data.jsonl \
         --model-name-or-path Qwen/Qwen2.5-1.5B-instruct \
