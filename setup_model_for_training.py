@@ -115,10 +115,26 @@ def setup_model(model=None, orthogonal_subspace_learning: bool = False, **kwargs
     
     # Load a subclassed model that supports orthogonal subspace learning using SVD decomposition
     def load_svd_model():
-        from svd_utils import create_svd_model_class
-        svd_cls = create_svd_model_class(ModelClass)
-        model = svd_cls.from_pretrained(**base_model_args)
-        return align_model_and_tokenizer(model, tokenizer)
+        # Import utility to decompose weights and inject projected low-rank updates
+        from svd_utils import create_svd_model_class, auto_generate_target_svd_config
+
+        tmp = ModelClass.from_pretrained(**base_model_args)
+        tmp = align_model_and_tokenizer(tmp, tokenizer)
+        # Estimate the per-layer effective rank for decomposition
+        svd_cfg = auto_generate_target_svd_config(tmp)
+        # Dynamically subclass model to override linear layers with SVD-decomposed versions
+        svd_cls = create_svd_model_class(tmp.__class__)
+        cfg = tmp.config
+        del tmp
+        torch.cuda.empty_cache()
+        model = svd_cls.from_pretrained(
+            **base_model_args,
+            config=cfg,
+            svd_config=svd_cfg,
+            initialize_svd=False,
+        )
+        model = align_model_and_tokenizer(model, tokenizer)
+        return model
     
     # Choose whether to apply orthogonal subspace learning (OSL) based on `orthogonal_subspace_learning` flag
     # OSL enables continual fine-tuning by constraining updates to low-rank directions orthogonal to critical knowledge that is to be preserved

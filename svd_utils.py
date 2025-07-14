@@ -16,18 +16,19 @@ def decompose_weight_matrix(weight: torch.Tensor, top_k: int):
     in continual learning scenarios.
     """
     device_local = weight.device
+    orig_dtype = weight.dtype
     W = weight.to(torch.float32)    # Ensure numerical stability for SVD
     U, S, Vt = torch.linalg.svd(W, full_matrices=False)
     k = min(top_k, S.shape[0])  # Cap to matrix rank
 
     # Split high-rank (frozen) and low-rank (trainable) subspaces
     svd = {
-        "U_high": U[:, :k].contiguous().detach().to(device=device_local),
-        "S_high": S[:k].contiguous().detach().to(device=device_local),
-        "V_high": Vt[:k, :].contiguous().detach().to(device=device_local),
-        "U_low": nn.Parameter(U[:, k:].contiguous().detach().to(device=device_local)),
-        "S_low": nn.Parameter(S[k:].contiguous().detach().to(device=device_local)),
-        "V_low": nn.Parameter(Vt[k:, :].contiguous().detach().to(device=device_local)),
+        "U_high": U[:, :k].contiguous().detach().to(device=device_local, dtype=orig_dtype),
+        "S_high": S[:k].contiguous().detach().to(device=device_local, dtype=orig_dtype),
+        "V_high": Vt[:k, :].contiguous().detach().to(device=device_local, dtype=orig_dtype),
+        "U_low": nn.Parameter(U[:, k:].contiguous().detach().to(device=device_local, dtype=orig_dtype)),
+        "S_low": nn.Parameter(S[k:].contiguous().detach().to(device=device_local, dtype=orig_dtype)),
+        "V_low": nn.Parameter(Vt[k:, :].contiguous().detach().to(device=device_local, dtype=orig_dtype)),
         "rank_high": k, # Store for later use in orthogonal projection
     }
     return svd
@@ -171,18 +172,21 @@ def create_svd_model_class(base_cls):
             """Load pretrained weights and automatically initialize SVD parameters."""
             # Do not initialize SVD during the initial construction so we load
             # the original dense weights first
+            # First load the base model normally without any SVD kwargs
+            init_cfg = svd_config if svd_config is not None else {}
             model = super(ModelWithSVD, cls).from_pretrained(
                 pretrained_model_name_or_path,
                 *model_args,
-                svd_config=svd_config or {},
-                initialize_svd=False,
+                svd_config=init_cfg,
+                # initialize_svd=False,
                 **kwargs,
             )
 
             # Auto-generate SVD config if not provided
             if svd_config is None:
                 svd_config = auto_generate_target_svd_config(model)
-                model.svd_config = svd_config
+
+            model.svd_config = svd_config
 
             # Decompose weights into high/low rank components
             model.reinitialize_svd()
@@ -330,12 +334,14 @@ def optim_wrapper(optimizer, model):
     if not hasattr(model, "project_gradients"):
         return optimizer
 
+    import types
+
     orig_step = optimizer.step
 
-    def step(*args, **kwargs):
+    def step(self, *args, **kwargs):
         model.project_gradients()
         return orig_step(*args, **kwargs)
 
-    optimizer.step = step
+    optimizer.step = types.MethodType(step, optimizer)
     return optimizer
 
