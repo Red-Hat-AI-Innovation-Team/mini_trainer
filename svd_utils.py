@@ -166,6 +166,28 @@ def create_svd_model_class(base_cls):
             if initialize_svd:
                 self._initialize_svd_parameters()
 
+        @classmethod
+        def from_pretrained(cls, pretrained_model_name_or_path, *model_args, svd_config=None, **kwargs):
+            """Load pretrained weights and automatically initialize SVD parameters."""
+            # Do not initialize SVD during the initial construction so we load
+            # the original dense weights first
+            model = super(ModelWithSVD, cls).from_pretrained(
+                pretrained_model_name_or_path,
+                *model_args,
+                svd_config=svd_config or {},
+                initialize_svd=False,
+                **kwargs,
+            )
+
+            # Auto-generate SVD config if not provided
+            if svd_config is None:
+                svd_config = auto_generate_target_svd_config(model)
+                model.svd_config = svd_config
+
+            # Decompose weights into high/low rank components
+            model.reinitialize_svd()
+            return model
+
         def reinitialize_svd(self):
             """Reinitializes the decomposition (e.g., when learning a new task in continual learning)."""
             self.name_mapping = {}
@@ -275,6 +297,45 @@ def create_svd_model_class(base_cls):
                 }
                 project_gradient_to_orthogonal_space(svd_dict)
 
+        def prepare_state_dict_for_save(self, state_dict):
+            """Reconstruct dense weights into ``state_dict`` for saving."""
+            if not hasattr(self, "name_mapping"):
+                return state_dict
+            for orig, safe in self.name_mapping.items():
+                U_high = state_dict.pop(f"{safe}_U_high")
+                S_high = state_dict.pop(f"{safe}_S_high")
+                V_high = state_dict.pop(f"{safe}_V_high")
+                U_low = state_dict.pop(f"svd_params.{safe}.U_low")
+                S_low = state_dict.pop(f"svd_params.{safe}.S_low")
+                V_low = state_dict.pop(f"svd_params.{safe}.V_low")
+                W = reconstruct_weight_matrix(
+                    {
+                        "U_high": U_high,
+                        "S_high": S_high,
+                        "V_high": V_high,
+                        "U_low": U_low,
+                        "S_low": S_low,
+                        "V_low": V_low,
+                    }
+                )
+                state_dict[orig] = W
+            return state_dict
+
     ModelWithSVD.__name__ = f"{base_cls.__name__}WithSVD"
     return ModelWithSVD
+
+
+def optim_wrapper(optimizer, model):
+    """Wrap optimizer.step to project gradients before each update."""
+    if not hasattr(model, "project_gradients"):
+        return optimizer
+
+    orig_step = optimizer.step
+
+    def step(*args, **kwargs):
+        model.project_gradients()
+        return orig_step(*args, **kwargs)
+
+    optimizer.step = step
+    return optimizer
 

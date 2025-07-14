@@ -13,7 +13,6 @@ from batch_metrics import BatchMetrics
 from sampler import get_data_loader
 from setup_model_for_training import setup_model, setup_training_components
 from utils import init_distributed_environment, log_rank_0, setup_logger
-from svd_utils import reconstruct_weight_matrix # Used to reconstruct full weight matrix from SVD components during model save (for Orthogonal Subspace Learning models)
 
 app = Typer(
     pretty_exceptions_show_locals=False,  # Hide local variables in tracebacks
@@ -23,8 +22,6 @@ app = Typer(
 def take_gradient_step(model, optimizer, lr_scheduler):
     """Scales gradients, applies clipping, and takes an optimization step."""
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    if hasattr(model, "project_gradients"):
-        model.project_gradients()
     optimizer.step()
     lr_scheduler.step()
     optimizer.zero_grad()
@@ -44,26 +41,8 @@ def save_model(fsdp_model, samples_seen, output_dir, model_name_or_path):
     from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
     state_dict = get_model_state_dict(fsdp_model, options=StateDictOptions(full_state_dict=True))
     inner = getattr(fsdp_model, "module", fsdp_model)
-    # If model uses orthogonal subspace learning, reconstruct full weights from SVD components before saving
-    if hasattr(inner, "name_mapping"):
-        for orig, safe in inner.name_mapping.items():
-            U_high = state_dict.pop(f"{safe}_U_high")
-            S_high = state_dict.pop(f"{safe}_S_high")
-            V_high = state_dict.pop(f"{safe}_V_high")
-            U_low = state_dict.pop(f"svd_params.{safe}.U_low")
-            S_low = state_dict.pop(f"svd_params.{safe}.S_low")
-            V_low = state_dict.pop(f"svd_params.{safe}.V_low")
-            W = reconstruct_weight_matrix(
-                {
-                    "U_high": U_high,
-                    "S_high": S_high,
-                    "V_high": V_high,
-                    "U_low": U_low,
-                    "S_low": S_low,
-                    "V_low": V_low,
-                }
-            ).to(torch.bfloat16)
-            state_dict[orig] = W
+    if hasattr(inner, "prepare_state_dict_for_save"):
+        state_dict = inner.prepare_state_dict_for_save(state_dict)
     state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
     
     if rank == 0:
