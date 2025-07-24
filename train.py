@@ -8,6 +8,7 @@ from typer import Typer, Option
 
 from async_structured_logger import AsyncStructuredLogger
 import torch
+import torch.distributed as dist
 
 from batch_metrics import BatchMetrics
 from sampler import get_data_loader
@@ -76,7 +77,7 @@ def train(model, optimizer, lr_scheduler, data_loader, output_dir, min_samples_p
     model.train()
     metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{os.environ.get('RANK')}.jsonl")
     world_size = int(os.environ["WORLD_SIZE"])
-    is_main_process = os.environ.get("RANK") == "0"
+    is_main_process = dist.get_rank() == 0
 
     batch_totals = BatchMetrics()
     step = 0
@@ -185,7 +186,7 @@ def main(
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Log parameters only on rank 0
-    rank = int(os.environ.get("RANK", 0))
+    rank = dist.get_rank()
     if rank == 0:
         params = {
             "model_name_or_path": model_name_or_path,
@@ -217,6 +218,7 @@ def main(
         model_name_or_path=model_name_or_path,
         use_liger_kernels=use_liger_kernels,
         orthogonal_subspace_learning=orthogonal_subspace_learning,
+        rank=rank,
     )
     model, optimizer, lr_scheduler = setup_training_components(model,
                                                                learning_rate=learning_rate,
@@ -251,9 +253,10 @@ torchrun --nnodes=1 --nproc-per-node=8 train.py \
         --model-name-or-path Qwen/Qwen3-32B \
         --min-samples-per-checkpoint 3400 \
         --num-warmup-steps 20 \
-        --max-tokens-per-gpu 33000 \
-        --batch-size 128 \
-        --use-liger-kernels \
-        --seed 893 \
-        --learning-rate 5e-6
+        --max-tokens-per-gpu 60000              \
+        --batch-size 128                       \
+        --use-liger-kernels                    \
+        --seed 893                               \
+        --fsdp-sharding-strategy FULL_SHARD \
+        --learning-rate 6e-6
 '''

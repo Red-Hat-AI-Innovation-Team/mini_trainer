@@ -6,18 +6,28 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 from torch.distributed.device_mesh import init_device_mesh
-
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from utils import log_rank_0, patch_target_module
+from svd_utils import SVDModel
+
+
 
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
 # This mirrors TorchTitan: checkpoint each block, then shard each block and the full model.
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # Move model to GPU and disable HuggingFace cache
-    model = model.to(torch.device("cuda"))
+    if model.device.type != 'cuda':
+        # Move the model to the GPU if it's not already there
+        device = torch.device('cuda', dist.get_rank())
+        model.to(device)
+
     if hasattr(model, 'config'):
         try:
             model.config.use_cache = False
-        except Exception:
+        except Exception as e:
+            print(
+                f"WARNING: Failed to disable HuggingFace cache for model {model.__class__.__name__}: {e}"
+            )
             pass
     # 1) Find the HF transformer block container (GPT2: transformer.h, Llama: model.layers)
     if hasattr(model, "model") and hasattr(model.model, "layers"):
@@ -83,19 +93,29 @@ def align_model_and_tokenizer(model, tokenizer):
 
     return model
 
-def setup_model(model=None, orthogonal_subspace_learning: bool = False, **kwargs):
+
+def setup_model(
+    model=None,
+    orthogonal_subspace_learning: bool = False,
+    rank: int = 0,
+    upcast_dtype: torch.dtype = torch.float32,
+    output_dtype: torch.dtype | None = None,
+    **kwargs,
+) -> torch.nn.Module | SVDModel:
     base_model_args = {
         "pretrained_model_name_or_path": kwargs['model_name_or_path'],
         "torch_dtype": torch.bfloat16,
     }
     base_model_args["attn_implementation"] = "flash_attention_2"
 
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    tokenizer = AutoTokenizer.from_pretrained(kwargs['model_name_or_path'])
+    tokenizer = AutoTokenizer.from_pretrained(kwargs["model_name_or_path"])
 
-    if kwargs['use_liger_kernels']:
-        '''need to patch the loss function to not reduce, so we can reduce across all GPUs'''
-        from none_reduction_losses import liger_fixed_fused_linear_cross_entropy_none_reduction
+    if kwargs.get("use_liger_kernels", False):
+        """need to patch the loss function to not reduce, so we can reduce across all GPUs"""
+        from none_reduction_losses import (
+            liger_fixed_fused_linear_cross_entropy_none_reduction,
+        )
+
         patch_target_module(
             "liger_kernel.transformers.model.loss_utils.fixed_fused_linear_cross_entropy",
             liger_fixed_fused_linear_cross_entropy_none_reduction,
@@ -120,20 +140,49 @@ def setup_model(model=None, orthogonal_subspace_learning: bool = False, **kwargs
 
         tmp = ModelClass.from_pretrained(**base_model_args)
         tmp = align_model_and_tokenizer(tmp, tokenizer)
-        # Estimate the per-layer effective rank for decomposition
-        svd_cfg = auto_generate_target_svd_config(tmp)
         # Dynamically subclass model to override linear layers with SVD-decomposed versions
         svd_cls = create_svd_model_class(tmp.__class__)
         cfg = tmp.config
         del tmp
         torch.cuda.empty_cache()
-        model = svd_cls.from_pretrained(
+        model: SVDModel = svd_cls.from_pretrained(
             **base_model_args,
             config=cfg,
-            svd_config=svd_cfg,
             initialize_svd=False,
         )
+        
+        # we need to set these as attributes because HF Transformers
+        # doesn't like torch.dtype to be passed in through kwargs (aside from the `torch_dtype` kwarg)
+        model.upcast_dtype = upcast_dtype
+        if output_dtype:
+            model.output_dtype = output_dtype
+
         model = align_model_and_tokenizer(model, tokenizer)
+        device = torch.device("cuda", rank)
+        model = model.to(device)
+
+        # NOTE(osilkin): SVD over large models is very expensive, to optimize we handle
+        # each of these cases separately:
+        # 1.) non-distributed --> assume single process
+        # 2.) distributed, world-size=1 --> assume single process
+        # 3.) distributed, world-size > 1 --> use distributed SVD computation
+
+        if not dist.is_initialized() or dist.get_world_size() == 1:
+            # simple cases #1 and #2
+            model.reinitialize_svd(decompose_existing_weights=True)
+            torch.cuda.empty_cache()
+            return model
+
+        # Use distributed SVD computation across all ranks
+        log_rank_0("🚀 Computing distributed SVD across all ranks")
+        world_size = dist.get_world_size()
+        log_rank_0(f"Distributing SVD work across {world_size} ranks")
+
+        # Initialize SVD using distributed computation
+        model.reinitialize_svd_distributed()
+
+        log_rank_0("✅ Distributed SVD computation complete")
+        torch.cuda.empty_cache()
         return model
     
     # Choose whether to apply orthogonal subspace learning (OSL) based on `orthogonal_subspace_learning` flag

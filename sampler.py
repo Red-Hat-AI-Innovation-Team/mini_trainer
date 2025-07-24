@@ -105,11 +105,20 @@ class JsonlDataset(Dataset):
     def __getitem__(self, index: int):
         sample = self.dataset[int(index)]
         # Ignore the index and return a fresh copy of the sequence tensor.
+
+        # HACK(osilkin): this is just a hack to use the instructlab data processing script
+        # determine the number of loss counted tokens here
+
+        if (loss_counted_tokens := sample.get("num_loss_counted_tokens", None)) is None:
+            loss_counted_tokens = sum(
+                1 if label != -100 else 0 for label in sample["labels"]
+            )
+
         return {
             'input_ids': torch.tensor(sample['input_ids'], dtype=torch.long),
             'labels': torch.tensor(sample['labels'], dtype=torch.long),
             'len': sample['len'],
-            'num_loss_counted_tokens': sample['num_loss_counted_tokens']
+            'num_loss_counted_tokens': loss_counted_tokens,
         }
     
         
