@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Optional, Dict, Any
 import torch
 import torch.distributed as dist
@@ -109,13 +110,16 @@ def setup_model(
         "pretrained_model_name_or_path": kwargs['model_name_or_path'],
     }
     # Check if flash_attn is available, otherwise use eager
-    # This is mainly so we can easily test without having CUDA configured,
     # in practice we will need flash attention when running this repo
     try:
         import flash_attn
         base_model_args["attn_implementation"] = "flash_attention_2"
-    except ImportError:
-        base_model_args["attn_implementation"] = "eager"
+    except ImportError as e:
+        if os.environ.get("TESTING", "false").lower() == "true":
+            log_rank_0(f"Flash attention not available, but detected a testing environment so using eager implementation: {e}")
+            base_model_args["attn_implementation"] = "eager"
+        else:
+            raise e
 
     tokenizer = AutoTokenizer.from_pretrained(kwargs["model_name_or_path"])
 
