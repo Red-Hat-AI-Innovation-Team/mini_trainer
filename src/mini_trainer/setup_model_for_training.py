@@ -282,6 +282,8 @@ def setup_model(
             # If the config supports dtype specification, use it
             if hasattr(quantization_config, 'torch_dtype'):
                 quantization_config.torch_dtype = train_dtype
+            # Pass quantization_config to from_pretrained
+            base_model_args["quantization_config"] = quantization_config
             log_rank_0("🎯 Detected GPT-OSS model - applying dequantization for training")
         except ImportError:
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
