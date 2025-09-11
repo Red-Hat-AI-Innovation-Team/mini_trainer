@@ -40,7 +40,8 @@ dependencies = [
     "pytest",
     "tox",
     "tox-uv",
-    "liger-kernel",
+    "liger-kernel",  
+    "kernels"  # for flash-attention-3
 ]
 
 [project.optional-dependencies]
