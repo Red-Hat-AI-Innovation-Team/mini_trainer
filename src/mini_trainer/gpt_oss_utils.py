@@ -232,92 +232,101 @@ def convert_dequantized_to_quantized_format_correct(state_dict: Dict[str, torch.
     # Now convert expert parameters one at a time to manage GPU memory
     for param_name, param_tensor in expert_params_to_convert:
         logger.info(f"🔄 Converting {param_name}: {param_tensor.shape} {param_tensor.dtype}")
-        
+
         try:
+            # OPTIMIZATION: Move parameter to GPU for fast quantization, then back to CPU
+            # This matches the reference repo's chunked GPU processing approach
+            logger.info(f"   📤 Moving {param_name} to GPU for fast quantization")
+
+            # Move to GPU (parameters come from CPU after FSDP extraction)
+            param_gpu = param_tensor.cuda() if param_tensor.device.type == "cpu" else param_tensor
+
             # Use OpenAI's exact dimensional mapping discovered through reverse engineering
             # OpenAI's format: dequant[expert, row, col] -> blocks[expert, col, block_idx, byte_idx]
             # This means we quantize along the row dimension (dim=1), not the column dimension
-            
-            logger.info(f"🔄 Processing {param_name} with OpenAI's exact dimensional mapping")
-            logger.info(f"   Input shape: {param_tensor.shape}")
-            
+
+            logger.info(f"🔄 Processing {param_name} with OpenAI's exact dimensional mapping on GPU")
+            logger.info(f"   Input shape: {param_gpu.shape}")
+
             if "gate_up_proj" in param_name:
                 # gate_up_proj: dequantized is [experts, rows, cols] = [32, 2880, 5760]
                 # OpenAI quantizes each column separately: [32, 2880] -> [32, 90, 16] per column
                 # Result: [experts, cols, blocks_per_col, bytes_per_block] = [32, 5760, 90, 16]
-                experts, rows, cols = param_tensor.shape
+                experts, rows, cols = param_gpu.shape
                 blocks_per_col = rows // GROUP_SIZE
-                
+
                 logger.info(f"   Processing {cols} columns, each with {blocks_per_col} blocks")
-                
-                # OPTIMIZED: Process ALL columns at once using vectorized operations
+
+                # OPTIMIZED: Process ALL columns at once using vectorized operations ON GPU
                 # Reshape to process all columns simultaneously: [experts, cols, rows] = [32, 5760, 2880]
                 # Transpose to put columns first for efficient memory access
-                tensor_transposed = param_tensor.transpose(1, 2)  # [32, 5760, 2880]
-                
-                # Reshape for batch quantization: [32*5760, 1, 2880] 
+                tensor_transposed = param_gpu.transpose(1, 2)  # [32, 5760, 2880]
+
+                # Reshape for batch quantization: [32*5760, 1, 2880]
                 # This allows us to quantize all expert-column pairs at once
                 total_columns = experts * cols
                 reshaped_for_quant = tensor_transposed.reshape(total_columns, 1, rows)
-                
-                logger.info(f"   VECTORIZED: Quantizing {total_columns} columns simultaneously")
-                
-                # Single quantization call for all columns - MASSIVE speedup!
+
+                logger.info(f"   GPU VECTORIZED: Quantizing {total_columns} columns simultaneously")
+
+                # Single quantization call for all columns ON GPU - MASSIVE speedup!
                 all_blocks_flat, all_scales_flat, _ = _quantize_tensor_to_mxfp4_param(reshaped_for_quant, GROUP_SIZE)
-                
+
                 # Reshape back to the correct format
                 # all_blocks_flat: [32*5760, 1, 90, 16] -> [32, 5760, 90, 16]
                 blocks_u8 = all_blocks_flat.squeeze(1).reshape(experts, cols, blocks_per_col, 16)
                 # all_scales_flat: [32*5760, 1, 90] -> [32, 5760, 90]  
                 scales_i8 = all_scales_flat.squeeze(1).reshape(experts, cols, blocks_per_col)
-                
-            else:  # down_proj
-                # down_proj: dequantized is [experts, rows, cols] = [32, 2880, 2880]  
+
+            else:
+                # down_proj: dequantized is [experts, rows, cols] = [32, 2880, 2880]
                 # Same vectorized logic as gate_up_proj
-                experts, rows, cols = param_tensor.shape
+                experts, rows, cols = param_gpu.shape
                 blocks_per_col = rows // GROUP_SIZE
-                
+
                 logger.info(f"   Processing {cols} columns, each with {blocks_per_col} blocks")
-                
-                # OPTIMIZED: Process ALL columns at once using vectorized operations
+
+                # OPTIMIZED: Process ALL columns at once using vectorized operations ON GPU
                 # Transpose to put columns first: [32, 2880, 2880] -> [32, 2880, 2880]
-                tensor_transposed = param_tensor.transpose(1, 2)  # [32, 2880, 2880]
-                
-                # Reshape for batch quantization: [32*2880, 1, 2880] 
+                tensor_transposed = param_gpu.transpose(1, 2)  # [32, 2880, 2880]
+
+                # Reshape for batch quantization: [32*2880, 1, 2880]
                 total_columns = experts * cols
                 reshaped_for_quant = tensor_transposed.reshape(total_columns, 1, rows)
-                
-                logger.info(f"   VECTORIZED: Quantizing {total_columns} columns simultaneously")
-                
-                # Single quantization call for all columns - MASSIVE speedup!
+
+                logger.info(f"   GPU VECTORIZED: Quantizing {total_columns} columns simultaneously")
+
+                # Single quantization call for all columns ON GPU - MASSIVE speedup!
                 all_blocks_flat, all_scales_flat, _ = _quantize_tensor_to_mxfp4_param(reshaped_for_quant, GROUP_SIZE)
-                
+
                 # Reshape back to the correct format
                 # all_blocks_flat: [32*2880, 1, 90, 16] -> [32, 2880, 90, 16]
                 blocks_u8 = all_blocks_flat.squeeze(1).reshape(experts, cols, blocks_per_col, 16)
                 # all_scales_flat: [32*2880, 1, 90] -> [32, 2880, 90]  
                 scales_i8 = all_scales_flat.squeeze(1).reshape(experts, cols, blocks_per_col)
-            
+
             # Create new parameter names with _blocks and _scales
             blocks_name = param_name + "_blocks"
             scales_name = param_name + "_scales"
-            
+
             # Add +127 offset to scales for uint8 storage (HF format)
             scales_u8 = (scales_i8.to(torch.int32) + 127).clamp(0, 255).to(torch.uint8)
-            
-            # Store quantized parameters (move to CPU to save GPU memory)
+
+            # OPTIMIZATION: Move results back to CPU immediately to free GPU memory
+            logger.info(f"   📥 Moving quantized results back to CPU to free GPU memory")
             converted_state_dict[blocks_name] = blocks_u8.cpu()
             converted_state_dict[scales_name] = scales_u8.cpu()
-            
+
             logger.info(f"✅ {blocks_name}: {blocks_u8.shape} {blocks_u8.dtype}")
             logger.info(f"✅ {scales_name}: {scales_u8.shape} {scales_u8.dtype}")
-            
+
             conversion_count += 1
-            
-            # Clear GPU memory after each conversion
-            del blocks_u8, scales_i8, scales_u8
+
+            # OPTIMIZATION: Aggressive GPU memory cleanup after each parameter (reference repo pattern)
+            del param_gpu, tensor_transposed, reshaped_for_quant
+            del all_blocks_flat, all_scales_flat, blocks_u8, scales_i8, scales_u8
             torch.cuda.empty_cache()
-            
+            logger.info(f"   🧹 GPU memory cleared after processing {param_name}")
         except Exception as e:
             logger.error(f"❌ Failed to convert {param_name}: {e}")
             raise e
