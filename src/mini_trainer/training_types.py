@@ -22,9 +22,9 @@ class TrainingMode(str, Enum):
 class TorchrunArgs:
     """Arguments for torchrun distributed training configuration."""
     nnodes: int = 1
-    nproc_per_node: Union[str, int] = 1
+    nproc_per_node: str | int = 1
     node_rank: int = 0
-    rdzv_id: Union[str, int] = 123
+    rdzv_id: str | int = 123
     rdzv_endpoint: str = "127.0.0.1:1738"
 
 

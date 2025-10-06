@@ -86,7 +86,10 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     # Build torchrun command
     train_script = Path(__file__).parent / "train.py"
 
+    # build torchrun command args
     command = ["torchrun"]
+
+    # check torchrun args and remove empty or None parameters
     for key, value in torch_args.model_dump(exclude_none=True).items():
         if isinstance(value, str) and value == "":
             continue
