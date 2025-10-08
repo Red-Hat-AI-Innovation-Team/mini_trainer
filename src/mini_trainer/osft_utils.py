@@ -330,9 +330,9 @@ def create_svd_dict(
         R = min(N, M)
 
         # recreate how the matrices would be shaped inside of pytorch
-        U = torch.zeros((N, R), dtype=output_dtype)
-        S = torch.zeros((R,), dtype=output_dtype)
-        Vt = torch.zeros((R, M), dtype=output_dtype)
+        U = torch.zeros((N, R), dtype=original_dtype)
+        S = torch.zeros((R,), dtype=original_dtype)
+        Vt = torch.zeros((R, M), dtype=original_dtype)
 
     k = min(top_k, S.shape[0])  # Cap to matrix rank
 
@@ -387,8 +387,6 @@ def reconstruct_weight_matrix(
 
     # Combine the low-rank & high-rank components
     reconstructed = high_part + low_part
-    if output_dtype:
-        reconstructed = reconstructed.to(output_dtype)
     return reconstructed
 
 def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
