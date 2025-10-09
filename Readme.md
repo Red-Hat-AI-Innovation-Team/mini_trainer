@@ -9,9 +9,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/licenses/Apache-2.0)
 [![codecov](https://codecov.io/gh/Red-Hat-AI-Innovation-Team/mini_trainer/graph/badge.svg?token=FHCFYB1HJZ)](https://codecov.io/gh/Red-Hat-AI-Innovation-Team/mini_trainer)
 
-<img src="https://ai-innovation.team/images/toolkit%20logos/Black%20and%20White%20Labs/lab-mini-trainer.png" alt="Mini Trainer Logo" height="300"/>
-
 ### A lightweight, high-performance training library for efficient fine-tuning of large language models up to 70B parameters.
+
+<img src="https://ai-innovation.team/images/toolkit%20logos/Black%20and%20White%20Labs/lab-mini-trainer.png" alt="Mini Trainer Logo" height="150"/>
 
 **Built for speed, simplicity, and scalability** 🚀
 
@@ -26,7 +26,7 @@
 - 🎯 **FSDP2 Support** - Native PyTorch distributed training with FullyShardedDataParallel
 - 🚫 **Padding-Free** - Leverages Flash Attention for efficient computation without padding overhead
 - ♾️ **Infinite Sampling** - Continuous data streaming without manual epoch configuration
-- 🔬 **OSFT (Orthogonal Subspace Fine-Tuning)** - Advanced continual learning technique for parameter-efficient training
+- 🔬 **Orthogonal Subspace Fine-Tuning (OSFT)** - Advanced continual learning technique for parameter-efficient training
 - 📊 **Flexible Logging** - JSONL metrics logging with optional Weights & Biases integration
 
 ---
@@ -51,7 +51,6 @@ Mini Trainer implements **Orthogonal Subspace Fine-Tuning (OSFT)**, a breakthrou
 
 - 📝 **Blog Post**: [Sculpting Subspaces: How We Solved Continual Learning in LLMs](https://ai-innovation.team/blog/orthogonal-subspace-learning)
 - 📄 **Research Paper**: [arXiv:2504.07097](https://arxiv.org/abs/2504.07097)
-- 💻 **Code**: [orthogonal-subspace-learning](https://github.com/Red-Hat-AI-Innovation-Team/orthogonal-subspace-learning)
 
 ### 🚀 Using OSFT
 
