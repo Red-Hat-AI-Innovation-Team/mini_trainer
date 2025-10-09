@@ -9,7 +9,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/licenses/Apache-2.0)
 [![codecov](https://codecov.io/gh/Red-Hat-AI-Innovation-Team/mini_trainer/graph/badge.svg?token=FHCFYB1HJZ)](https://codecov.io/gh/Red-Hat-AI-Innovation-Team/mini_trainer)
 
-<img src="public/image.png" alt="Mini Trainer Logo" height="300"/>
+<img src="https://ai-innovation.team/images/toolkit%20logos/Black%20and%20White%20Labs/lab-mini-trainer.png" alt="Mini Trainer Logo" height="300"/>
 
 ### A lightweight, high-performance training library for efficient fine-tuning of large language models up to 70B parameters.
 
