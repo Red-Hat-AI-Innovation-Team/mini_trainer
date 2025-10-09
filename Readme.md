@@ -1,10 +1,18 @@
-# 🚀 Mini Trainer
+<div align="center">
+
+<img src="image.png" alt="Mini Trainer Logo" width="400"/>
+
+# Mini Trainer
 
 [![PR Tests](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> A lightweight, high-performance training library for efficient fine-tuning of large language models up to 70B parameters. Built for speed, simplicity, and scalability.
+### A lightweight, high-performance training library for efficient fine-tuning of large language models up to 70B parameters.
+
+**Built for speed, simplicity, and scalability** 🚀
+
+</div>
 
 ---
 
