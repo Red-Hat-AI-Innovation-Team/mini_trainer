@@ -1345,7 +1345,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             else:
                 raise ValueError(f"Input tensor must be 2D or 3D, got {x.dim()}D")
             
-            # Use existing tensor dtypes/devices for computation to avoid unnecessary casts
             # Cast to appropriate dtypes for computation
             upcast_dtype = self.upcast_dtype
             target_dtype = dtype
