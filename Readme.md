@@ -1,7 +1,7 @@
 <div align="center">
 
 
-# RH AMini Trainer
+# Mini Trainer
 
 
 [![PR Tests](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml)
