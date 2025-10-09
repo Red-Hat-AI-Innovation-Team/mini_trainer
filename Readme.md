@@ -1,7 +1,7 @@
 <div align="center">
 
 
-# Mini Trainer
+# RH AMini Trainer
 
 
 [![PR Tests](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml)
@@ -28,6 +28,45 @@
 - ♾️ **Infinite Sampling** - Continuous data streaming without manual epoch configuration
 - 🔬 **OSFT (Orthogonal Subspace Fine-Tuning)** - Advanced continual learning technique for parameter-efficient training
 - 📊 **Flexible Logging** - JSONL metrics logging with optional Weights & Biases integration
+
+---
+
+## 🔬 Orthogonal Subspace Fine-Tuning (OSFT)
+
+[![arXiv](https://img.shields.io/badge/arXiv-2504.07097-b31b1b.svg)](https://arxiv.org/abs/2504.07097)
+
+Mini Trainer implements **Orthogonal Subspace Fine-Tuning (OSFT)**, a breakthrough continual learning technique that enables models to learn new tasks **without catastrophic forgetting**. OSFT uses adaptive SVD-based decomposition to intelligently update models in unused parameter subspaces while preserving crucial prior knowledge.
+
+### 🎥 Learn More
+
+<div align="center">
+
+[![Orthogonal Subspace Learning](https://img.youtube.com/vi/iVp8aWkF_5M/0.jpg)](https://www.youtube.com/watch?v=iVp8aWkF_5M)
+
+**Watch our technical deep-dive on Orthogonal Subspace Learning**
+
+</div>
+
+### 📚 Resources
+
+- 📝 **Blog Post**: [Sculpting Subspaces: How We Solved Continual Learning in LLMs](https://ai-innovation.team/blog/orthogonal-subspace-learning)
+- 📄 **Research Paper**: [arXiv:2504.07097](https://arxiv.org/abs/2504.07097)
+- 💻 **Code**: [orthogonal-subspace-learning](https://github.com/Red-Hat-AI-Innovation-Team/orthogonal-subspace-learning)
+
+### 🚀 Using OSFT
+
+Enable OSFT in your training runs with the `--osft` flag:
+
+```bash
+torchrun --nnodes=1 --nproc-per-node=8 -m mini_trainer.train \
+    --model-name-or-path meta-llama/Llama-3.1-8B-Instruct \
+    --data-path ./data.jsonl \
+    --output-dir ./checkpoints \
+    --osft \
+    --osft-unfreeze-rank-ratio 0.25  # train the 25% least important parameters
+```
+
+The `--osft-unfreeze-rank-ratio` parameter controls how much of the model to update (0.0 = everything frozen, 1.0 = full training).
 
 ---
 
