@@ -1,12 +1,15 @@
 <div align="center">
 
-<img src="image.png" alt="Mini Trainer Logo" width="400"/>
 
 # Mini Trainer
 
+
 [![PR Tests](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/actions/workflows/pr-tests.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/licenses/Apache-2.0)
+[![codecov](https://codecov.io/gh/Red-Hat-AI-Innovation-Team/mini_trainer/graph/badge.svg?token=FHCFYB1HJZ)](https://codecov.io/gh/Red-Hat-AI-Innovation-Team/mini_trainer)
+
+<img src="public/image.png" alt="Mini Trainer Logo" height="300"/>
 
 ### A lightweight, high-performance training library for efficient fine-tuning of large language models up to 70B parameters.
 
@@ -119,10 +122,20 @@ Found a bug or have a feature request? We'd love to hear from you! Please [open 
 
 ## 📝 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
-Built with ❤️ by the Red Hat AI Innovation Team. Special thanks to the open-source community for contributions and feedback!
+Built with ❤️ by the [Red Hat AI Innovation Team](https://ai-innovation.team/). 
+
+Mini Trainer is part of a broader ecosystem of LLM tools developed by the AI Innovation Team. Check out our other projects:
+- [training_hub](https://github.com/Red-Hat-AI-Innovation-Team/training_hub) - Post-training algorithms for LLMs
+- [its_hub](https://github.com/Red-Hat-AI-Innovation-Team/its_hub) - Inference-time scaling for LLMs
+- [sdg_hub](https://github.com/Red-Hat-AI-Innovation-Team/sdg_hub) - Synthetic data generation pipelines
+- [reward_hub](https://github.com/Red-Hat-AI-Innovation-Team/reward_hub) - State-of-the-art reward models
+
+Visit [ai-innovation.team](https://ai-innovation.team/) to explore all our open-source tools and research.
+
+Special thanks to the open-source community for contributions and feedback!
