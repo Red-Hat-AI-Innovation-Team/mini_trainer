@@ -32,15 +32,12 @@ dependencies = [
     "typer",
     "aiofiles",
     "deprecated",
-    "numpy<2.3",
+    "numpy",
     "datasets",
     "transformers>=4.55.0",
     "ninja",
     "numba",
     "rich",
-    "pytest",
-    "tox",
-    "tox-uv",
 ]
 
 [project.optional-dependencies]
@@ -60,6 +57,9 @@ dev = [
     "ipython", 
     "ipykernel",
     "ipdb",
+    "pytest",
+    "tox",
+    "tox-uv",
 ]
 wandb = ["wandb"]
 
