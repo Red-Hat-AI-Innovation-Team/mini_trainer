@@ -449,7 +449,7 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
         # Apply projection: dV = dV - dV @ G (use local shard of dV)
         update = torch.mm(local_dV, G_local)
         local_dV.add_(update, alpha=-1.0)
-        
+
         if hasattr(dV, "_local_tensor"):
             dV._local_tensor.copy_(local_dV)
         else:
@@ -1456,8 +1456,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     disable=main_local_rank != 0,
                 )
             ):
-                # Extract SVD components from CPU state_dict (avoid touching FSDP sharded params)
+                # Extract module path by removing parameter suffix (e.g., ".weight") from the original parameter name
+                # This is needed to construct the OSFT component keys in the state_dict
+                # Example: "model.layers.0.self_attn.q_proj.weight" → "model.layers.0.self_attn.q_proj"
+                # which allows us to access "model.layers.0.self_attn.q_proj.osft_U_high", etc.
                 module_path = orig.rsplit('.', 1)[0]
+
+                # Extract SVD components from CPU state_dict (avoid touching FSDP sharded params)
                 U_high = state_dict.pop(f"{module_path}.osft_U_high")
                 S_high = state_dict.pop(f"{module_path}.osft_S_high")
                 V_high = state_dict.pop(f"{module_path}.osft_V_high")
