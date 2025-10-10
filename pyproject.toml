@@ -36,7 +36,7 @@ dependencies = [
     "datasets",
     "transformers>=4.55.0",
     "ninja",
-    "numba",
+    "numba>=0.62.0",
     "rich",
 ]
 
