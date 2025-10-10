@@ -440,16 +440,12 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
         local_V_high = getattr(V_high, "to_local", lambda: V_high)()
         local_dV = getattr(dV, "to_local", lambda: dV)()
 
-        # Compute Gram matrix G = V_high^T @ V_high for global projection across row-sharded V_high
-        # Assumes column dimension is consistent across ranks (row sharding over singular vectors)
-        G_local = torch.mm(local_V_high.transpose(0, 1), local_V_high)
+        # Low-memory projection: dV -= (dV @ V_high^T) @ V_high
+        P_local = torch.mm(local_dV, local_V_high.transpose(0, 1))   # [r_low_local, k_local]
+        update_local = torch.mm(P_local, local_V_high)                # [r_low_local, M]
         if dist.is_initialized() and dist.get_world_size() > 1:
-            dist.all_reduce(G_local, op=dist.ReduceOp.SUM)
-
-        # Apply projection: dV = dV - dV @ G (use local shard of dV)
-        update = torch.mm(local_dV, G_local)
-        local_dV.add_(update, alpha=-1.0)
-
+            dist.all_reduce(update_local, op=dist.ReduceOp.SUM)
+        local_dV.add_(update_local, alpha=-1.0)
         if hasattr(dV, "_local_tensor"):
             dV._local_tensor.copy_(local_dV)
         else:
