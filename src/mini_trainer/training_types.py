@@ -7,7 +7,7 @@ used across the mini_trainer package to avoid duplication and ensure consistency
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Literal
 
 
 class TrainingMode(str, Enum):
@@ -21,11 +21,11 @@ class TrainingMode(str, Enum):
 @dataclass
 class TorchrunArgs:
     """Arguments for torchrun distributed training configuration."""
-    nnodes: int = 1
-    nproc_per_node: str | int = 1
-    node_rank: int = 0
-    rdzv_id: str | int = 123
-    rdzv_endpoint: str = "127.0.0.1:1738"
+    nnodes: int
+    nproc_per_node: Literal["gpu"] | int
+    node_rank: int
+    rdzv_id: str | int
+    rdzv_endpoint: str
 
 
 @dataclass
