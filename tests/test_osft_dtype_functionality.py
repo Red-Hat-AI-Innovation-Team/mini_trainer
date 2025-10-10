@@ -23,23 +23,23 @@ class TestOSFTDtypeFunctions:
         # Create a test weight matrix
         weight = torch.randn(64, 32, dtype=torch.bfloat16)
         top_k = 16
-
+        
         # Test with default upcast_dtype=float32, output_dtype=None
         svd_dict = create_svd_dict(
-            weight,
-            top_k,
+            weight, 
+            top_k, 
             decompose_existing=True,
             upcast_dtype=torch.float32,
             output_dtype=None
         )
-
-        # Should return tensors in original dtype (bfloat16)
-        assert svd_dict["U_high"].dtype == torch.bfloat16
-        assert svd_dict["S_high"].dtype == torch.bfloat16
-        assert svd_dict["V_high"].dtype == torch.bfloat16
-        assert svd_dict["U_low"].dtype == torch.bfloat16
-        assert svd_dict["S_low"].dtype == torch.bfloat16
-        assert svd_dict["V_low"].dtype == torch.bfloat16
+        
+        # Should default output_dtype to upcast_dtype when None
+        assert svd_dict["U_high"].dtype == torch.float32
+        assert svd_dict["S_high"].dtype == torch.float32
+        assert svd_dict["V_high"].dtype == torch.float32
+        assert svd_dict["U_low"].dtype == torch.float32
+        assert svd_dict["S_low"].dtype == torch.float32
+        assert svd_dict["V_low"].dtype == torch.float32
     
     def test_create_svd_dict_custom_dtypes(self):
         """Test create_svd_dict with custom upcast and output dtypes."""
@@ -77,34 +77,35 @@ class TestOSFTDtypeFunctions:
             output_dtype=torch.float16
         )
         
-        # Should create zeros with original weight dtype when decompose_existing=False
-        assert svd_dict["U_high"].dtype == torch.bfloat16
-        assert svd_dict["S_high"].dtype == torch.bfloat16
-        assert svd_dict["V_high"].dtype == torch.bfloat16
+        # Should create zeros with output_dtype
+        assert svd_dict["U_high"].dtype == torch.float16
+        assert svd_dict["S_high"].dtype == torch.float16
+        assert svd_dict["V_high"].dtype == torch.float16
         assert torch.allclose(svd_dict["U_high"], torch.zeros_like(svd_dict["U_high"]))
     
     def test_reconstruct_weight_matrix_dtypes(self):
         """Test reconstruct_weight_matrix handles dtypes correctly."""
         weight = torch.randn(32, 16, dtype=torch.bfloat16)
         top_k = 8
-
+        
         # Create SVD dict
         svd_dict = create_svd_dict(
-            weight,
-            top_k,
+            weight, 
+            top_k, 
             decompose_existing=True,
             upcast_dtype=torch.float32,
             output_dtype=torch.bfloat16
         )
-
+        
         # Test reconstruction with different dtypes
         reconstructed = reconstruct_weight_matrix(
             svd_dict,
+            upcast_dtype=torch.float32,
             output_dtype=torch.float16
         )
-
-        # Reconstructed dtype should stay in original param dtype
-        assert reconstructed.dtype == torch.bfloat16
+        
+        # Should return tensor in output_dtype
+        assert reconstructed.dtype == torch.float16
         assert reconstructed.shape == weight.shape
     
     def test_reconstruct_weight_matrix_no_output_dtype(self):
@@ -113,35 +114,37 @@ class TestOSFTDtypeFunctions:
         top_k = 8
         
         svd_dict = create_svd_dict(weight, top_k, decompose_existing=True)
-
+        
         # Reconstruct without specifying output_dtype
         reconstructed = reconstruct_weight_matrix(
             svd_dict,
+            upcast_dtype=torch.float32,
             output_dtype=None
         )
-
-        # Should stay in original SVD component dtype
-        assert reconstructed.dtype == torch.bfloat16
+        
+        # Should stay in upcast_dtype
+        assert reconstructed.dtype == torch.float32
     
     def test_svd_reconstruction_accuracy(self):
         """Test that SVD reconstruction preserves the original matrix with high precision."""
         # Use a small matrix for exact reconstruction
-        weight = torch.randn(16, 8, dtype=torch.float32)
+        weight = torch.randn(16, 8, dtype=torch.float64)
         top_k = min(weight.shape) - 1  # Almost full rank
-
+        
         svd_dict = create_svd_dict(
-            weight,
-            top_k,
+            weight, 
+            top_k, 
             decompose_existing=True,
-            upcast_dtype=torch.float32,
-            output_dtype=torch.float32
+            upcast_dtype=torch.float64,
+            output_dtype=torch.float64
         )
-
+        
         reconstructed = reconstruct_weight_matrix(
             svd_dict,
-            output_dtype=torch.float32
+            upcast_dtype=torch.float64,
+            output_dtype=torch.float64
         )
-
+        
         # Should be very close to original (within numerical precision)
         assert torch.allclose(weight, reconstructed, atol=1e-6)
 
@@ -206,7 +209,6 @@ class TestOSFTModelDtypeIntegration:
             # Should use model's output_dtype
             assert reconstructed.dtype == torch.bfloat16
     
-    @patch.dict('os.environ', {'TESTING': 'true'})
     @patch('mini_trainer.setup_model_for_training.create_osft_model_class')
     @patch('mini_trainer.setup_model_for_training.align_model_and_tokenizer')
     @patch('torch.distributed.is_initialized', return_value=False)
@@ -396,28 +398,31 @@ class TestOSFTDtypeEdgeCases:
             assert svd_dict["U_low"].device == device
     
     def test_reconstruct_with_mismatched_dtypes(self):
-        """Test that reconstruction fails gracefully with mismatched dtypes."""
+        """Test reconstruction when SVD components have different dtypes."""
         weight = torch.randn(32, 16, dtype=torch.float32)
-
+        
         # Create SVD dict with one dtype
         svd_dict = create_svd_dict(
-            weight,
-            top_k=8,
+            weight, 
+            top_k=8, 
             decompose_existing=True,
             upcast_dtype=torch.float32,
             output_dtype=torch.float32
         )
-
+        
         # Manually change some component dtypes to simulate mixed precision
         svd_dict["U_high"] = svd_dict["U_high"].to(torch.bfloat16)
         svd_dict["S_high"] = svd_dict["S_high"].to(torch.bfloat16)
-
-        # Current implementation doesn't handle mixed dtypes - should raise RuntimeError
-        with pytest.raises(RuntimeError, match="expected m1 and m2 to have the same dtype"):
-            reconstruct_weight_matrix(
-                svd_dict,
-                output_dtype=torch.bfloat16
-            )
+        
+        # Reconstruction should still work by upcasting everything
+        reconstructed = reconstruct_weight_matrix(
+            svd_dict,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.bfloat16
+        )
+        
+        assert reconstructed.dtype == torch.bfloat16
+        assert reconstructed.shape == weight.shape
     
     def test_svd_dict_invalid_tensor_dimensions(self):
         """Test that create_svd_dict raises error for non-2D tensors."""
