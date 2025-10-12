@@ -25,8 +25,20 @@ class TorchrunArgs:
     nproc_per_node: Literal["gpu"] | int
     node_rank: int
     rdzv_id: str | int
-    rdzv_endpoint: str
 
+    # Optional rendezvous / master fields
+    rdzv_endpoint: Optional[str] = None
+    master_addr: Optional[str] = None
+    master_port: Optional[int] = None
+
+    def __post_init__(self):
+        has_rdzv = self.rdzv_endpoint is not None
+        has_master = self.master_addr is not None or self.master_port is not None
+
+        if has_rdzv == has_master:  # both True or both False
+            raise ValueError(
+                "Provide either `rdzv_endpoint` OR both `master_addr` and `master_port`, not both."
+            )
 
 @dataclass
 class TrainingArgs:
