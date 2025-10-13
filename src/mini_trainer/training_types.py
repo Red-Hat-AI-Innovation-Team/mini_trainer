@@ -32,8 +32,8 @@ class TorchrunArgs:
     master_port: Optional[int] = None
 
     def __post_init__(self):
-        has_rdzv = self.rdzv_endpoint is not None
-        has_master = self.master_addr is not None or self.master_port is not None
+        has_rdzv = bool(self.rdzv_endpoint)
+        has_master = bool(self.master_addr) or bool(self.master_port)
 
         if has_rdzv == has_master:  # both True or both False
             raise ValueError(
