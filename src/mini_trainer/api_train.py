@@ -107,7 +107,7 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         if torch_args.master_port:
             command += [f"--master-port={torch_args.master_port}"]
 
-    elif:
+    elif torch_args.rdzv_endpoint:
         command += [f"--rdzv-endpoint={torch_args.rdzv_endpoint}"]
 
     command.extend([
