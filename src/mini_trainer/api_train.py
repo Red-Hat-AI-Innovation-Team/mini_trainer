@@ -109,6 +109,8 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
     elif torch_args.rdzv_endpoint:
         command += [f"--rdzv-endpoint={torch_args.rdzv_endpoint}"]
+    else:
+        command += ["--standalone"]
 
     command.extend([
         str(train_script),
