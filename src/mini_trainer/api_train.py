@@ -93,17 +93,23 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         f"--nproc-per-node={torch_args.nproc_per_node}",
         f"--rdzv-id={torch_args.rdzv_id}",
     ]
+
+    if torch_args.master_addr and torch_args.rdzv_endpoint:
+        raise ValueError("Provide either `rdzv_endpoint` OR `master_addr`, not both.")
+
     if torch_args.master_addr:
         # master-addr + master-port are only compatible with the static backend
         # so here we pass it explicitly
         command += [
             f"--master-addr={torch_args.master_addr}",
-            f"--master-port={torch_args.master_port}",
-            f"--rdzv-backend=static"
+            "--rdzv-backend=static"
         ]
-    else:
+        if torch_args.master_port:
+            command += [f"--master-port={torch_args.master_port}"]
+
+    elif:
         command += [f"--rdzv-endpoint={torch_args.rdzv_endpoint}"]
-    
+
     command.extend([
         str(train_script),
         f"--model-name-or-path={train_args.model_name_or_path}",
