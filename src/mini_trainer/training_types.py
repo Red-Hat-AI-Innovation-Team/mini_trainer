@@ -21,10 +21,10 @@ class TrainingMode(str, Enum):
 @dataclass
 class TorchrunArgs:
     """Arguments for torchrun distributed training configuration."""
-    nnodes: int
-    nproc_per_node: Literal["gpu"] | int
-    node_rank: int
-    rdzv_id: str | int
+    nnodes: int = 1
+    nproc_per_node: Literal["gpu"] | int = 1
+    node_rank: int = 0
+    rdzv_id: str | int = 123
 
     # Optional rendezvous / master fields
     rdzv_endpoint: Optional[str] = None
