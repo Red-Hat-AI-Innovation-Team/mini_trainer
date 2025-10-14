@@ -32,10 +32,11 @@ class TorchrunArgs:
     master_port: Optional[int] = None
 
     def __post_init__(self):
-        has_rdzv = bool(self.rdzv_endpoint)
-        has_master = bool(self.master_addr) or bool(self.master_port)
-
-        if has_rdzv == has_master:  # both True or both False
+        # in order to support systems which are still relying on `master_addr`
+        # to construct the rendezvous address, torchrun must not be given a non-empty value
+        # for rdzv_endpoint:
+        # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/distributed/run.py#L799
+        if self.rdzv_endpoint and self.master_addr: 
             raise ValueError(
                 "Provide either `rdzv_endpoint` OR both `master_addr` and `master_port`, not both."
             )
