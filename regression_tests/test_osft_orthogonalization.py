@@ -98,26 +98,47 @@ class OrthogonalityTracker:
         lines.append(f"Failed checks (>{self.margin_deg}°): {self.failed_checks}")
         lines.append(f"Pass rate: {100 * (1 - self.failed_checks / max(self.total_checks, 1)):.2f}%")
         lines.append("")
-        
+
         if self.is_successful():
             lines.append("✅ RESULT: PASSED - All orthogonality constraints satisfied!")
         else:
             lines.append("❌ RESULT: FAILED - Orthogonality violations detected!")
-        
+
         lines.append("")
         lines.append("Top 5 Largest Angle Deviations:")
         lines.append("-" * 100)
         lines.append(f"{'Rank':<6}{'Parameter':<40}{'Check Type':<15}{'Max Diff (°)':<15}{'Step':<10}")
         lines.append("-" * 100)
-        
+
         for i, metric in enumerate(self.get_top_violations(5), 1):
             lines.append(
                 f"{i:<6}{metric['param_name']:<40}{metric['check_type']:<15}"
                 f"{metric['max_angle_diff']:<15.4f}{metric['step']:<10}"
             )
-        
+
         lines.append("=" * 100)
         return "\n".join(lines)
+
+    def to_dict(self) -> Dict:
+        """Serialize tracker state to dictionary for distributed gathering."""
+        return {
+            'metrics': self.metrics,
+            'total_checks': self.total_checks,
+            'failed_checks': self.failed_checks,
+        }
+
+    def merge_from_dict(self, other_dict: Dict):
+        """Merge metrics from another tracker's serialized state."""
+        self.total_checks += other_dict['total_checks']
+        self.failed_checks += other_dict['failed_checks']
+
+        for key, metric in other_dict['metrics'].items():
+            if key not in self.metrics:
+                self.metrics[key] = metric
+            else:
+                # Keep the worst violation
+                if metric['max_angle_diff'] > self.metrics[key]['max_angle_diff']:
+                    self.metrics[key] = metric
 
 
 def get_osft_params(model):
@@ -425,14 +446,39 @@ def test_osft_orthogonalization(
         # Progress reporting
         if rank == 0 and (step % 10 == 0 or step == 1):
             print(f"Step {step}/{num_steps} - Loss: {summed_loss.item():.4f}")
-    
+
+    # Synchronize all ranks after training
+    dist.barrier()
+
+    # Gather metrics from all ranks to rank 0
+    tracker_dicts = [None] * world_size if rank == 0 else None
+    dist.gather_object(
+        tracker.to_dict(),
+        tracker_dicts,
+        dst=0
+    )
+
+    # Merge metrics on rank 0
+    if rank == 0:
+        for i, other_tracker_dict in enumerate(tracker_dicts):
+            if i == rank:
+                continue  # Skip self
+            if other_tracker_dict is not None:
+                tracker.merge_from_dict(other_tracker_dict)
+
     if rank == 0:
         print("=" * 100)
         print("Training completed!")
         print("")
         print(tracker.get_summary())
-    
-    return tracker.is_successful()
+
+    # Broadcast success status to all ranks
+    success = tracker.is_successful()
+    success_tensor = torch.tensor([1 if success else 0], dtype=torch.int, device=device)
+    dist.broadcast(success_tensor, src=0)
+    success = bool(success_tensor.item())
+
+    return success
 
 
 if __name__ == "__main__":
@@ -497,5 +543,7 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
     )
 
+    # Synchronize before destroying process group
+    dist.barrier()
     dist.destroy_process_group()
     sys.exit(0 if success else 1)
