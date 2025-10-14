@@ -28,7 +28,7 @@ class TestDataclasses:
         assert args.nproc_per_node == 1
         assert args.node_rank == 0
         assert args.rdzv_id == 123
-        assert args.rdzv_endpoint == "127.0.0.1:1738"
+        assert args.rdzv_endpoint == None
         
         # Test with custom nproc_per_node only
         args = TorchrunArgs(nproc_per_node=8)
@@ -405,10 +405,10 @@ class TestRunTraining:
             # Verify command structure
             assert command[0] == "torchrun"
             assert "--nnodes=2" in command
-            assert "--node_rank=1" in command
-            assert "--nproc_per_node=4" in command
-            assert "--rdzv_id=999" in command
-            assert "--rdzv_endpoint=master:1234" in command
+            assert "--node-rank=1" in command
+            assert "--nproc-per-node=4" in command
+            assert "--rdzv-id=999" in command
+            assert "--rdzv-endpoint=master:1234" in command
             
             # Verify training arguments
             assert "--model-name-or-path=my-model" in command
