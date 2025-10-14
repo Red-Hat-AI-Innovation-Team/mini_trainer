@@ -86,14 +86,23 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     # Build torchrun command
     train_script = Path(__file__).parent / "train.py"
 
-    # build torchrun command args
-    command = ["torchrun"]
-
-    # check torchrun args and remove empty or None parameters
-    for key, value in torch_args.model_dump(exclude_none=True).items():
-        if isinstance(value, str) and value == "":
-            continue
-        command.append(f"--{key.replace('_', '-')}={value}")
+    command = [
+        "torchrun",
+        f"--nnodes={torch_args.nnodes}",
+        f"--node-rank={torch_args.node_rank}",
+        f"--nproc-per-node={torch_args.nproc_per_node}",
+        f"--rdzv-id={torch_args.rdzv_id}",
+    ]
+    if torch_args.master_addr:
+        # master-addr + master-port are only compatible with the static backend
+        # so here we pass it explicitly
+        command += [
+            f"--master-addr={torch_args.master_addr}",
+            f"--master-port={torch_args.master_port}",
+            f"--rdzv-backend=static"
+        ]
+    else:
+        command += [f"--rdzv-endpoint={torch_args.rdzv_endpoint}"]
     
     command.extend([
         str(train_script),
