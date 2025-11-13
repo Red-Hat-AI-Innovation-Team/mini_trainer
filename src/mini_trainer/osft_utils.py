@@ -10,7 +10,6 @@ from tqdm import tqdm
 
 from mini_trainer.utils import log_rank_0, check_distributed_is_synchronized
 from mini_trainer.gpt_oss_utils import is_gpt_oss_model
-from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
 import os
 
@@ -965,6 +964,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if is_gpt_oss:
                 base_kwargs = _filter_osft_parameters(filtered_kwargs, OSFT_GPT_OSS_FILTERED_PARAMS)
                 # For GPT-OSS, we need to use the specific model class
+                from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
                 actual_osft_cls = create_osft_model_class(GptOssForCausalLM)
             else:
                 base_kwargs = filtered_kwargs.copy()
@@ -1122,7 +1122,8 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # It's possible for processes to be dysynchronized by this point due to the
             # uneven split of work when processing model layers in parallel.
             # So here we ensure that everything is synchronized before proceeding.
-            check_distributed_is_synchronized() 
+            device = next(self.parameters()).device
+            check_distributed_is_synchronized(device) 
             broadcast_svd_results(self, assignments, world_size)
             torch.distributed.barrier()
 

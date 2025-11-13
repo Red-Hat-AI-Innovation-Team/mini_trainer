@@ -108,3 +108,9 @@ class TrainingArgs:
     # from train.py:
     save_best_val_loss: bool = field(default=False, metadata={"help": "Whether to save checkpoints when validation loss improves"})
     val_loss_improvement_threshold: float = field(default=0.0, metadata={"help": "Minimum validation loss improvement required to trigger a save"})
+
+    # HPU specific parameters
+    device: str = field(default="cuda", metadata={"help": "Device to use for training ('cuda' or 'hpu')"})
+    torch_compile: bool = field(default=False, metadata={"help": "Enable torch.compile (HPU only)"})
+    num_chunks: int = field(default=1, metadata={"help": "Number of chunks to split dataset into for sequential training"})
+    
