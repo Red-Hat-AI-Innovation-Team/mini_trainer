@@ -308,7 +308,13 @@ def compute_validation_loss(model, val_data_loader, device):
                 }
                 
                 # Forward pass
-                output = model(**model_inputs)
+                hpu_args = {}
+                if device.type == "hpu":
+                    hpu_args = {
+                        "use_flash_attention": True,
+                        "lazy_mode": False,
+                    }
+                output = model(**model_inputs, **hpu_args)
                 loss = output.loss.float().sum()
                 loss_metrics = loss.detach().item()
                 
@@ -718,7 +724,8 @@ def train(
         for batch in data_loader_it:
             batch_start_time = time.time()
             batch_totals.reset_batch()
-            torch.cuda.reset_peak_memory_stats()
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats()
             for grad_accum, mb in enumerate(batch):
                 mb_start_time = time.time()
                 mb_num_loss_counted_tokens = mb['num_loss_counted_tokens']
@@ -732,7 +739,13 @@ def train(
                     'position_ids': mb['position_ids'].to(device),
                 }
 
-                output = model(**model_inputs)
+                hpu_args = {}
+                if device.type == "hpu":
+                    hpu_args = {
+                        "use_flash_attention": True,
+                        "lazy_mode": False,
+                    }
+                output = model(**model_inputs, **hpu_args)
                 
                 # GPT-OSS: add auxiliary loss if present, otherwise use standard loss
                 if hasattr(output, 'aux_loss') and output.aux_loss is not None:
@@ -788,7 +801,7 @@ def train(
                     "total_samples_accumulated": total_samples_accumulated,
                     "total_tokens_accumulated": total_tokens_processed,
                     "samples_per_second": bm['num_samples']/batch_time if batch_time > 0 else 0.0,
-                    "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
+                    "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9) if device.type == "cuda" else 0.0,
                     'val_loss': last_validation_loss,
                 }
             # Add validation metrics if it's time to validate
@@ -962,9 +975,14 @@ def main(
     wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
     wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
     wandb_entity: Annotated[str | None, Option(help="Weights & Biases entity/team name")] = None,
+    
+    # HPU specific parameters
+    device: Annotated[str, Option(help="Device to use for training ('cuda' or 'hpu')")] = "cuda",
+    torch_compile: Annotated[bool, Option(help="Enable torch.compile (HPU only)")] = False,
+    num_chunks: Annotated[int, Option(help="Number of chunks to split dataset into for sequential training")] = 1,
 ):
     
-    init_distributed_environment()
+    init_distributed_environment(device)
     # TODO: make the path creation lazy, but confirm that we can write to the given directory
     # at this point
     output_path = Path(output_dir)
@@ -1037,6 +1055,9 @@ def main(
             "GLOBAL_RANK": global_rank,
             "NODE_RANK": node_rank,
             "WORLD_SIZE": world_size,
+            "device": device,
+            "torch_compile": torch_compile,
+            "num_chunks": num_chunks,
         }
         
         # Initialize wandb with the same params config
@@ -1114,6 +1135,7 @@ def main(
         osft_upcast_dtype=osft_upcast_dtype_torch,
         osft_output_dtype=osft_output_dtype_torch,
         osft_memory_efficient_init=osft_memory_efficient_init,
+        device=device,
     )
     model, optimizer, lr_scheduler = setup_training_components(
         model=model,

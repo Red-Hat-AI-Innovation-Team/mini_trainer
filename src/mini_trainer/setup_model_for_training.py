@@ -8,7 +8,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 from torch.distributed.device_mesh import init_device_mesh
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, Mxfp4Config
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_target_module
 from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, _initialize_osft_with_distribution, _set_osft_dtypes, create_osft_model_class
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
@@ -44,14 +44,18 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     # 3) Build a 1D device mesh over all ranks
     world_size = dist.get_world_size()
-    mesh = init_device_mesh("cuda", [world_size], mesh_dim_names=["fsdp"])
+    device = next(model.parameters()).device.type
+    mesh = init_device_mesh(device, [world_size], mesh_dim_names=["fsdp"])
 
     # 4) Mixed-precision policy using bfloat16 for Flash Attention compatibility
     # Flash Attention requires bfloat16 for proper operation
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16, 
-        reduce_dtype=torch.float32,
-    )
+    if device == "cuda":
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, 
+            reduce_dtype=torch.float32,
+        )
+    else:
+        mp_policy = MixedPrecisionPolicy()
 
     # 4) FSDP2 wrap each block
     for idx, block in enumerate(layers):
@@ -181,6 +185,7 @@ def setup_osft_model(
     osft_upcast_dtype=torch.float32,
     osft_output_dtype=None,
     osft_memory_efficient_init: bool = False,
+    device: str = "cuda",
 ):
     """
     High-level function to set up an OSFT model with all necessary configuration.
@@ -239,7 +244,7 @@ def setup_osft_model(
     _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype)
 
     # Handle initialization based on memory_efficient_init flag
-    device = torch.device("cuda", rank)
+    device = torch.device(device, rank)
 
     if osft_memory_efficient_init:
         # Memory-efficient: Initialize OSFT on CPU, then move to GPU
@@ -268,6 +273,7 @@ def setup_model(
     osft_target_patterns: list[str] | None = None,
     use_liger_kernels: bool = False,
     osft_memory_efficient_init: bool = False,
+    device: str = "cuda",
 ) -> torch.nn.Module | OSFTModel:
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
@@ -282,6 +288,7 @@ def setup_model(
     if is_gpt_oss:
         try:
             # Try to specify the target dtype for dequantization
+            from transformers import Mxfp4Config
             quantization_config = Mxfp4Config(dequantize=True)
             # If the config supports dtype specification, use it
             if hasattr(quantization_config, 'torch_dtype'):
@@ -293,18 +300,19 @@ def setup_model(
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
     
     # Check if flash_attn is available and set appropriate attention implementation
-    try:
-        import flash_attn
-        if is_gpt_oss:
-            base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
-            log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
-        else:
-            base_model_args["attn_implementation"] = "flash_attention_2"
-    except ImportError as e:
-        if os.environ.get("TESTING", "false").lower() == "true":
-            base_model_args["attn_implementation"] = "eager"
-        else:
-            raise e
+    if device != "hpu":
+        try:
+            import flash_attn
+            if is_gpt_oss:
+                base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
+                log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
+            else:
+                base_model_args["attn_implementation"] = "flash_attention_2"
+        except ImportError as e:
+            if os.environ.get("TESTING", "false").lower() == "true":
+                base_model_args["attn_implementation"] = "eager"
+            else:
+                raise e
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 
@@ -359,6 +367,7 @@ def setup_model(
             osft_upcast_dtype=osft_upcast_dtype,
             osft_output_dtype=effective_osft_output_dtype,
             osft_memory_efficient_init=osft_memory_efficient_init,
+            device=device,
         )
     
     # Choose whether to apply orthogonal subspace learning (OSL) based on `osft` flag

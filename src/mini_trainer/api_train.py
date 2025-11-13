@@ -180,7 +180,12 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
  
     if train_args.save_dtype:
         command.append(f"--save-dtype={train_args.save_dtype}")
-    
+
+    command.append(f"--device={train_args.device}")
+    if train_args.torch_compile:
+        command.append("--torch-compile")
+    command.append(f"--num-chunks={train_args.num_chunks}")
+
     logger.info("Running training command as subprocess: %s", " ".join(command))
     
     # Run the training process
