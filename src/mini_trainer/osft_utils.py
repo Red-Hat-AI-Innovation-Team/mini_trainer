@@ -6,7 +6,10 @@ import typing as t
 from typing import Protocol
 from weakref import ref as weakref
 from dataclasses import dataclass
-from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 import gc
 import types
 
@@ -24,16 +27,17 @@ from mini_trainer.fsdp2_lazy_init import (
 import os
 
 # Memory optimization constants
-OSFT_CACHE_CLEAR_INTERVAL = int(os.getenv(
-    "OSFT_CACHE_CLEAR_INTERVAL", 5
-))  # Clear GPU cache every N parameters during matrix reconstruction
+OSFT_CACHE_CLEAR_INTERVAL = int(
+    os.getenv("OSFT_CACHE_CLEAR_INTERVAL", 5)
+)  # Clear GPU cache every N parameters during matrix reconstruction
 
 
 Role = t.Literal["osft_target", "non_osft"]
 
+
 @dataclass(frozen=True)
 class ParamSpec:
-    logical_key: str                 # e.g., "transformer.blocks.12.attn.q_proj.weight"
+    logical_key: str  # e.g., "transformer.blocks.12.attn.q_proj.weight"
     shape: tuple[int, ...]
     dtype: torch.dtype
     role: Role
@@ -41,7 +45,7 @@ class ParamSpec:
 
 @dataclass(frozen=True)
 class OSFTFactorSpec:
-    parent_key: str                  # e.g., "transformer.blocks.12.attn.q_proj"
+    parent_key: str  # e.g., "transformer.blocks.12.attn.q_proj"
     # Derived runtime keys that will exist after OSFT install:
     U_high: str
     S_high: str
@@ -110,8 +114,13 @@ OSFTModel = OSFTModelProtocol
 
 # OSFT parameter classification constants
 OSFT_ALL_PARAMS = {
-    'osft_config', 'initialize_osft', 'rank_ratio', 'target_patterns',
-    'upcast_dtype', 'output_dtype', 'model_name_or_class'
+    "osft_config",
+    "initialize_osft",
+    "rank_ratio",
+    "target_patterns",
+    "upcast_dtype",
+    "output_dtype",
+    "model_name_or_class",
 }
 
 # Parameters that GPT-OSS constructors don't accept and must be filtered out
@@ -119,15 +128,18 @@ OSFT_GPT_OSS_FILTERED_PARAMS = OSFT_ALL_PARAMS
 
 # Parameters that base model loading doesn't accept (subset of GPT-OSS filtered)
 OSFT_BASE_MODEL_FILTERED_PARAMS = {
-    'osft_config', 'initialize_osft', 'rank_ratio', 'target_patterns'
+    "osft_config",
+    "initialize_osft",
+    "rank_ratio",
+    "target_patterns",
 }
 
 # Parameters that OSFT class constructors can handle
 OSFT_CLASS_PARAMS = {
-    'upcast_dtype',
-    'output_dtype',
-    'model_name_or_class',
-    'lazy_init_tokenizer_align_fn',
+    "upcast_dtype",
+    "output_dtype",
+    "model_name_or_class",
+    "lazy_init_tokenizer_align_fn",
 }
 
 
@@ -136,7 +148,7 @@ MODEL_CONFIGS = {
     "llama": {
         "patterns": [
             "self_attn.q_proj",
-            "self_attn.k_proj", 
+            "self_attn.k_proj",
             "self_attn.v_proj",
             "self_attn.o_proj",
             "mlp.gate_proj",
@@ -167,7 +179,7 @@ MODEL_CONFIGS = {
         "patterns": [
             "attn.q_proj",
             "attn.k_proj",
-            "attn.v_proj", 
+            "attn.v_proj",
             "attn.out_proj",
             "mlp.fc_in",
             "mlp.fc_out",
@@ -178,7 +190,7 @@ MODEL_CONFIGS = {
             "attn.attention.q_proj",
             "attn.attention.k_proj",
             "attn.attention.v_proj",
-            "attn.attention.out_proj", 
+            "attn.attention.out_proj",
             "mlp.c_fc",
             "mlp.c_proj",
         ]
@@ -197,7 +209,7 @@ MODEL_CONFIGS = {
         "patterns": [
             "self_attn.q_proj",
             "self_attn.k_proj",
-            "self_attn.v_proj", 
+            "self_attn.v_proj",
             "self_attn.o_proj",
             "mlp.gate_proj",
             "mlp.down_proj",
@@ -252,18 +264,18 @@ MODEL_CONFIGS = {
             "self_attn.q_proj",
             "self_attn.k_proj",
             "self_attn.v_proj",
-            "self_attn.o_proj", 
+            "self_attn.o_proj",
             "mlp.gate_proj",
             "mlp.down_proj",
             "mlp.up_proj",
         ]
-    }
+    },
 }
 
 # Define model name mappings at module level
 MODEL_NAME_MAPPINGS = {
     "llama": "llama",
-    "gpt-j": "gpt-j", 
+    "gpt-j": "gpt-j",
     "gptj": "gpt-j",  # Handle both "gpt-j" and "gptj" variants
     "gpt-neo": "gpt-neo",
     "gptneo": "gpt-neo",  # Handle both "gpt-neo" and "gptneo" variants
@@ -279,7 +291,7 @@ MODEL_NAME_MAPPINGS = {
     "granite": "granite",
     "gpt2": "gpt2",
     # Easy to add more mappings
-    # "phi": "phi", 
+    # "phi": "phi",
 }
 
 
@@ -325,6 +337,7 @@ def cast_to_osft_model(model: torch.nn.Module) -> OSFTModel:
     if not is_osft_model(model):
         raise TypeError(f"Model {type(model)} does not implement OSFT interface")
     return model  # type: ignore
+
 
 def create_svd_dict(
     weight: torch.Tensor,
@@ -381,7 +394,7 @@ def create_svd_dict(
 
         # recreate how the matrices would be shaped inside of pytorch
         if use_meta:
-            meta_device = torch.device('meta')
+            meta_device = torch.device("meta")
             U = torch.zeros((N, R), dtype=output_dtype, device=meta_device)
             S = torch.zeros((R,), dtype=output_dtype, device=meta_device)
             Vt = torch.zeros((R, M), dtype=output_dtype, device=meta_device)
@@ -400,7 +413,7 @@ def create_svd_dict(
         "U_low": nn.Parameter(U[:, k:].contiguous().detach().to(device=device_local)),
         "S_low": nn.Parameter(S[k:].contiguous().detach().to(device=device_local)),
         "V_low": nn.Parameter(Vt[k:, :].contiguous().detach().to(device=device_local)),
-        "rank_high": k, # Store for later use in orthogonal projection
+        "rank_high": k,  # Store for later use in orthogonal projection
     }
     return svd
 
@@ -448,6 +461,7 @@ def reconstruct_weight_matrix(
         reconstructed = reconstructed.to(output_dtype)
     return reconstructed
 
+
 def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
     """
     Projects the gradient of the low-rank parameters (U_low, V_low) to be orthogonal to the frozen high-rank subspace.
@@ -483,7 +497,7 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
             dist.all_reduce(proj_coeff, op=dist.ReduceOp.SUM)
         # Apply projection using only local rows of U_high
         local_dU.addmm_(local_U_high, proj_coeff, alpha=-1.0)
-        
+
         if hasattr(dU, "_local_tensor"):
             dU._local_tensor.copy_(local_dU)
         else:
@@ -500,7 +514,7 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
         G_local = torch.mm(local_V_high.transpose(0, 1), local_V_high)
         if dist.is_initialized() and dist.get_world_size() > 1:
             dist.all_reduce(G_local, op=dist.ReduceOp.SUM)
-        
+
         # Apply projection: dV = dV - dV @ G (use local shard of dV)
         update = torch.mm(local_dV, G_local)
         local_dV.add_(update, alpha=-1.0)
@@ -527,14 +541,13 @@ def get_osft_target_parameters(model, osft_config):
     return target_params
 
 
-
 def _get_model_patterns_from_name(name: str) -> list:
     """
     Get model patterns from a model name string.
-    
+
     Args:
         name: Model name string
-        
+
     Returns:
         List of patterns for the model
     """
@@ -542,9 +555,10 @@ def _get_model_patterns_from_name(name: str) -> list:
     for identifier, config_key in MODEL_NAME_MAPPINGS.items():
         if identifier in name.lower():
             return MODEL_CONFIGS[config_key]["patterns"]
-    
+
     # Default fallback
     return MODEL_CONFIGS["default"]["patterns"]
+
 
 def get_model_patterns(model_name_or_class):
     """Get patterns for a model from name string or class object."""
@@ -554,28 +568,30 @@ def get_model_patterns(model_name_or_class):
         if hasattr(name, "__name__"):
             name = name.__name__
         else:
-            raise ValueError(f"Invalid model name or class: {model_name_or_class} (expected str or class object)")
-    
+            raise ValueError(
+                f"Invalid model name or class: {model_name_or_class} (expected str or class object)"
+            )
+
     return _get_model_patterns_from_name(name)
 
 
 def get_model_config(model_name_or_class=None, target_patterns=None):
     """
     Get SVD target patterns for a model.
-    
+
     Args:
         model_name_or_class: Model name/class to get predefined patterns for, or None
         target_patterns: Custom list of patterns to use instead of predefined ones
-        
+
     Returns:
         List of patterns to match against parameter names
     """
     if target_patterns is not None:
         return target_patterns
-        
+
     if model_name_or_class is None:
         return MODEL_CONFIGS["default"]["patterns"]
-    
+
     return get_model_patterns(model_name_or_class)
 
 
@@ -590,12 +606,12 @@ def auto_generate_target_osft_config(
         model_name_or_class: Model name/class to get predefined patterns for, or None for auto-detection
         target_patterns: Custom list of patterns to use instead of predefined ones
         rank_ratio: Ratio of the smaller dimension to use for top-k rank (default: 0.5)
-        
+
     Returns:
         Dictionary mapping parameter names to their top-k values
     """
     target_patterns = get_model_config(model_name_or_class, target_patterns)
-    
+
     config = {}
     for name, param in model.named_parameters():
         if any(pat in name for pat in target_patterns) and len(param.shape) == 2:
@@ -611,11 +627,11 @@ def auto_generate_target_osft_config(
 def _filter_osft_parameters(kwargs: dict, filter_set: set[str]) -> dict:
     """
     Filter out OSFT-specific parameters using the specified filter set.
-    
+
     Args:
         kwargs: Dictionary of keyword arguments
         filter_set: Set of parameter names to filter out
-        
+
     Returns:
         Filtered dictionary with specified parameters removed
     """
@@ -625,10 +641,10 @@ def _filter_osft_parameters(kwargs: dict, filter_set: set[str]) -> dict:
 def _extract_osft_class_kwargs(kwargs: dict) -> tuple[dict, dict]:
     """
     Separate OSFT class-specific kwargs from other kwargs.
-    
+
     Args:
         kwargs: Full kwargs dictionary
-        
+
     Returns:
         Tuple of (osft_class_kwargs, filtered_kwargs)
     """
@@ -648,10 +664,10 @@ def _load_model_memory_efficient(
     Memory-efficient loading for OSFT models to avoid CUDA/CPU OOM.
     This is only supported in distributed environments.
 
-    
+
     This function loads models to CPU first, extracts state dict, then creates
     the OSFT model to minimize peak memory usage during initialization.
-    
+
     Args:
         actual_osft_cls: The OSFT model class to instantiate
         pretrained_model_name_or_path: Model path or name
@@ -659,37 +675,48 @@ def _load_model_memory_efficient(
         base_kwargs: Base model kwargs (already filtered)
         init_cfg: OSFT configuration
         osft_class_kwargs: OSFT class-specific parameters
-        
+
     Returns:
         Loaded OSFT model
     """
     if not dist.is_available() or not dist.is_initialized():
-        raise RuntimeError('memory efficient initialization is only supported in distributed')
+        raise RuntimeError(
+            "memory efficient initialization is only supported in distributed"
+        )
 
     # Get the base model class from the OSFT class inheritance chain
     base_model_class = None
     for base in actual_osft_cls.__mro__:
-        if hasattr(base, 'from_pretrained') and base != actual_osft_cls and 'WithOSFT' not in base.__name__:
+        if (
+            hasattr(base, "from_pretrained")
+            and base != actual_osft_cls
+            and "WithOSFT" not in base.__name__
+        ):
             base_model_class = base
             break
-    
+
     if base_model_class is None:
-        raise ValueError(f"Could not find base model class in inheritance chain of {actual_osft_cls}")
-    
+        raise ValueError(
+            f"Could not find base model class in inheritance chain of {actual_osft_cls}"
+        )
+
     log_rank_0(f"🎯 Using base model class: {base_model_class.__name__}")
     log_rank_0("🧠 Using memory-efficient loading to avoid CUDA OOM")
-    
+
     # Remove additional OSFT parameters before calling base model's from_pretrained
-    final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
-    
+    final_base_kwargs = _filter_osft_parameters(
+        base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS
+    )
+
     # Force CPU loading via default behavior and match the train_dtype for FSDP2
     # Need to get train_dtype from base_kwargs or default to float32
-    load_dtype = base_kwargs.get('torch_dtype', None)
+    load_dtype = base_kwargs.get("torch_dtype", None)
     if load_dtype is None:
-        raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
-    final_base_kwargs['torch_dtype'] = load_dtype
+        raise ValueError(
+            "error: model does not have a `torch_dtype` setting, please report this to the developers"
+        )
+    final_base_kwargs["torch_dtype"] = load_dtype
 
-    
     # initialize params to instance the OSFT model
     # global rank 0 process actually loads the model, and all other procs
     # will receive and store the data in these vars
@@ -702,7 +729,7 @@ def _load_model_memory_efficient(
     # which gets reused later for memory-efficient initialization. The extracted config
     # is broadcast to all processes so they can correctly initialize a model on the meta
     # device, allowing them to create a prototype of the same model without loading any data.
-    
+
     if dist.get_rank() == 0:
         with torch.no_grad():
             log_rank_0(f"📥 Loading base model to CPU in {load_dtype}...")
@@ -712,7 +739,7 @@ def _load_model_memory_efficient(
                 **final_base_kwargs,
             )
 
-            align_fn = osft_class_kwargs.get('lazy_init_tokenizer_align_fn')
+            align_fn = osft_class_kwargs.get("lazy_init_tokenizer_align_fn")
             if align_fn:
                 base_model = align_fn(base_model)
 
@@ -725,15 +752,17 @@ def _load_model_memory_efficient(
 
             # export the buffer dict - FSDP2 doesn't wrap this by default
             buffer_dict = dict(base_model.named_buffers())
- 
+
             # Delete base model immediately to free memory
             del base_model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
+
         # we need this for the pickle
         if not config:
-            raise ValueError("during memory-efficient OSFT loading, rank 0 loaded a model with no config!")
+            raise ValueError(
+                "during memory-efficient OSFT loading, rank 0 loaded a model with no config!"
+            )
 
     # other processes wait
     dist.barrier()
@@ -748,14 +777,16 @@ def _load_model_memory_efficient(
 
     # config is necessary for properly loading the model
     if not config:
-        raise ValueError(f"during memory-efficient OSFT loading, rank {dist.get_rank()} loaded a model with no config!")
-    
+        raise ValueError(
+            f"during memory-efficient OSFT loading, rank {dist.get_rank()} loaded a model with no config!"
+        )
+
     log_rank_0("instantiating OSFT model on meta device")
     extra_kwargs = {}
     if dist.get_rank() == 0:
         # rank 0 passes the OG state dict to the OSFT model for later access
-        extra_kwargs['lazy_init_og_state_dict'] = state_dict
-    
+        extra_kwargs["lazy_init_og_state_dict"] = state_dict
+
     # this instantiates the model as we'd expect, except that params and buffers
     # only load their metadata (dtype, shape) without loading the raw data or creating new random weights
     with torch.device("meta"):
@@ -763,29 +794,26 @@ def _load_model_memory_efficient(
             config=config,
             initialize_osft=False,
             # TODO: remove `upcast_dtype` and `output_dtype`
-            upcast_dtype=osft_class_kwargs.get('upcast_dtype', torch.float32),
-            output_dtype=osft_class_kwargs.get('output_dtype', None),
+            upcast_dtype=osft_class_kwargs.get("upcast_dtype", torch.float32),
+            output_dtype=osft_class_kwargs.get("output_dtype", None),
             fsdp2_lazy_init=True,
- 
             # provide the osft model with the logical set of original parameter keys
             lazy_init_param_keys=param_keys,
             lazy_init_buffer_dict=buffer_dict,
-            **extra_kwargs
+            **extra_kwargs,
         )
- 
+
     return model
-
-
 
 
 def _build_osft_kwargs(osft_rank_ratio, osft_target_patterns):
     """
     Build OSFT kwargs from parameters, eliminating duplication.
-    
+
     Args:
         osft_rank_ratio: Rank ratio parameter
         osft_target_patterns: Target patterns parameter
-        
+
     Returns:
         Dictionary of OSFT kwargs
     """
@@ -800,7 +828,7 @@ def _build_osft_kwargs(osft_rank_ratio, osft_target_patterns):
 def _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype):
     """
     Set OSFT dtype attributes on model for computation precision control.
-    
+
     Args:
         model: The OSFT model to configure
         osft_upcast_dtype: Upcast dtype for computations
@@ -809,11 +837,6 @@ def _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype):
     model.upcast_dtype = osft_upcast_dtype
     if osft_output_dtype:
         model.output_dtype = osft_output_dtype
-
-
-
-
-
 
 
 def create_osft_model_class(base_cls) -> type[OSFTModel]:
@@ -848,26 +871,36 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             lazy_init_buffer_dict: dict[str, torch.Tensor] | None = None,
             **kwargs,
         ):
-
             # validation
             if fsdp2_lazy_init:
                 if not dist.is_available() or not dist.is_initialized():
-                    raise ValueError("cannot use fsdp2 lazy init when torch.distributed is unavailable")
-                
+                    raise ValueError(
+                        "cannot use fsdp2 lazy init when torch.distributed is unavailable"
+                    )
+
                 if initialize_osft:
-                    raise ValueError("cannot initialize in the __init__ method when calling lazy init")
-                
-                if dist.get_rank() == 0 and (not isinstance(lazy_init_og_state_dict, dict) or not lazy_init_og_state_dict):
-                    raise ValueError("expected the original state dict on rank 0 but it wasn't provided!")
-            
+                    raise ValueError(
+                        "cannot initialize in the __init__ method when calling lazy init"
+                    )
+
+                if dist.get_rank() == 0 and (
+                    not isinstance(lazy_init_og_state_dict, dict)
+                    or not lazy_init_og_state_dict
+                ):
+                    raise ValueError(
+                        "expected the original state dict on rank 0 but it wasn't provided!"
+                    )
+
             # Filter out OSFT-specific parameters for GPT-OSS compatibility
             is_gpt_oss = is_gpt_oss_model(config)
             if is_gpt_oss:
                 # Remove any OSFT-specific parameters that GPT-OSS constructor won't accept
                 kwargs = _filter_osft_parameters(kwargs, OSFT_GPT_OSS_FILTERED_PARAMS)
             super().__init__(config, **kwargs)
-            self.osft_config = osft_config if osft_config else {}  # Maps parameter names → top_k
- 
+            self.osft_config = (
+                osft_config if osft_config else {}
+            )  # Maps parameter names → top_k
+
             # for fsdp2 lazy initialization
             self.fsdp2_lazy_init = fsdp2_lazy_init
             self._lazy_init_pending = fsdp2_lazy_init
@@ -877,13 +910,18 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 FSDP2_LAZY_INIT_OSFT if fsdp2_lazy_init else None,
             )
 
- 
             # create a set of logical keys
-            self.lazy_init_param_keys = lazy_init_param_keys if lazy_init_param_keys else []
-            self.lazy_init_buffer_dict = lazy_init_buffer_dict if lazy_init_buffer_dict else {}
+            self.lazy_init_param_keys = (
+                lazy_init_param_keys if lazy_init_param_keys else []
+            )
+            self.lazy_init_buffer_dict = (
+                lazy_init_buffer_dict if lazy_init_buffer_dict else {}
+            )
             self._osft_handles: dict[str, tuple[weakref[nn.Module], str]] = {}
             self.logical_osft_keys = []
-            self.orig_param_registry: dict[str, ParamSpec] = {}  # stores all of the original params
+            self.orig_param_registry: dict[
+                str, ParamSpec
+            ] = {}  # stores all of the original params
             self.osft_paramspec_registry: dict[str, OSFTFactorSpec] = {}
 
             # We want to define how we will upcast & what precision we'll store the SVD
@@ -892,8 +930,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # and store in the original data-type by default (usually bf16)
             self.upcast_dtype = upcast_dtype
             # Handle cases where the base model doesn't have a dtype attribute
-            default_dtype = getattr(self, 'dtype', torch.bfloat16)
-            self.output_dtype = output_dtype if output_dtype is not None else default_dtype
+            default_dtype = getattr(self, "dtype", torch.bfloat16)
+            self.output_dtype = (
+                output_dtype if output_dtype is not None else default_dtype
+            )
 
             self._reset_osft_metadata()
 
@@ -924,37 +964,45 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
         ):
             """
             Standard non-distributed loading for OSFT models.
-            
+
             This method uses the parent class's from_pretrained directly,
             which is simpler and doesn't require distributed coordination.
-            
+
             Args:
                 actual_osft_cls: The OSFT model class to instantiate
                 pretrained_model_name_or_path: Model path or name
                 model_args: Positional arguments for model loading
                 base_kwargs: Base model kwargs (already filtered)
                 osft_class_kwargs: OSFT class-specific parameters
-                
+
             Returns:
                 Loaded OSFT model
             """
             log_rank_0("using simple (non-distributed) OSFT loading")
-            
+
             # get the base model class from the OSFT class inheritance chain
             base_model_class = None
             for base in actual_osft_cls.__mro__:
-                if hasattr(base, 'from_pretrained') and base != actual_osft_cls and 'WithOSFT' not in base.__name__:
+                if (
+                    hasattr(base, "from_pretrained")
+                    and base != actual_osft_cls
+                    and "WithOSFT" not in base.__name__
+                ):
                     base_model_class = base
                     break
-            
+
             if base_model_class is None:
-                raise ValueError(f"Could not find base model class in inheritance chain of {actual_osft_cls}")
-            
+                raise ValueError(
+                    f"Could not find base model class in inheritance chain of {actual_osft_cls}"
+                )
+
             log_rank_0(f"🎯 Using base model class: {base_model_class.__name__}")
-            
+
             # remove additional OSFT parameters before calling base model's from_pretrained
-            final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
-            
+            final_base_kwargs = _filter_osft_parameters(
+                base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS
+            )
+
             # load the base model directly using parent's from_pretrained
             log_rank_0(f"📥 Loading base model from {pretrained_model_name_or_path}...")
             base_model = base_model_class.from_pretrained(
@@ -962,30 +1010,30 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 *model_args,
                 **final_base_kwargs,
             )
-            
+
             # extract config and state dict
             config = base_model.config
             state_dict = base_model.state_dict()
-            
+
             # create OSFT model with config
             log_rank_0("🔧 Creating OSFT model wrapper...")
             model = actual_osft_cls(
                 config=config,
                 osft_config={},  # Will be set later
                 initialize_osft=False,
-                upcast_dtype=osft_class_kwargs.get('upcast_dtype', torch.float32),
-                output_dtype=osft_class_kwargs.get('output_dtype', None),
+                upcast_dtype=osft_class_kwargs.get("upcast_dtype", torch.float32),
+                output_dtype=osft_class_kwargs.get("output_dtype", None),
                 fsdp2_lazy_init=False,
             )
-            
+
             # load the state dict into the OSFT model
             model.load_state_dict(state_dict)
-            
+
             # clean up base model
             del base_model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
+
             log_rank_0("✅ Non-distributed OSFT model loaded successfully")
             return model
 
@@ -997,18 +1045,18 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             target_patterns=None,
             rank_ratio=0.5,
             fsdp2_lazy_init=False,
-            **kwargs
+            **kwargs,
         ) -> type[OSFTModel]:
             """Load pretrained weights and automatically initialize OSFT parameters.
- 
+
             Args:
                 fsdp2_lazy_init:
                     When this setting is enabled, the model is initialized in a memory-efficient way and assumes
                     that there is a future FSDP2 sharding that will happen. This is only compatible with torch.distributed.
             """
             log_rank_0("\033[33m!!!! Calling from_pretrained !!!!\033[0m")
- 
-            initialize_osft = kwargs.pop('initialize_osft', False)
+
+            initialize_osft = kwargs.pop("initialize_osft", False)
 
             # validation
             if fsdp2_lazy_init:
@@ -1017,28 +1065,31 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         "FSDP2 lazy initialization requires torch.distributed to be available and initialized. "
                         "Either initialize distributed training or set fsdp2_lazy_init=False for non-distributed loading."
                     )
- 
- 
+
             # Check if this is a GPT-OSS model
             is_gpt_oss = is_gpt_oss_model(pretrained_model_name_or_path)
-            
+
             # Extract OSFT class-specific kwargs
             osft_class_kwargs, filtered_kwargs = _extract_osft_class_kwargs(kwargs)
-            
+
             # Apply model-specific parameter filtering
             if is_gpt_oss:
-                base_kwargs = _filter_osft_parameters(filtered_kwargs, OSFT_GPT_OSS_FILTERED_PARAMS)
+                base_kwargs = _filter_osft_parameters(
+                    filtered_kwargs, OSFT_GPT_OSS_FILTERED_PARAMS
+                )
                 # For GPT-OSS, we need to use the specific model class
                 actual_osft_cls = create_osft_model_class(GptOssForCausalLM)
             else:
                 base_kwargs = filtered_kwargs.copy()
-                base_kwargs['initialize_osft'] = False
+                base_kwargs["initialize_osft"] = False
                 actual_osft_cls = cls
-            
+
             # choose loading path based on fsdp2_lazy_init flag
             if fsdp2_lazy_init:
                 # memory-efficient distributed loading
-                log_rank_0("🧠 distributed environment detected, using memory-efficient loading strategy")
+                log_rank_0(
+                    "🧠 distributed environment detected, using memory-efficient loading strategy"
+                )
                 model = _load_model_memory_efficient(
                     actual_osft_cls,
                     pretrained_model_name_or_path,
@@ -1048,7 +1099,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 )
             else:
                 # standard non-distributed loading
-                log_rank_0(f"⚡ Using standard model loading (model_type: {'gpt_oss' if is_gpt_oss else 'standard'})")
+                log_rank_0(
+                    f"⚡ Using standard model loading (model_type: {'gpt_oss' if is_gpt_oss else 'standard'})"
+                )
                 model = cls._load_non_distributed(
                     actual_osft_cls,
                     pretrained_model_name_or_path,
@@ -1057,17 +1110,19 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     osft_class_kwargs,
                 )
 
-            # quickly check this 
+            # quickly check this
             if fsdp2_lazy_init and not model._lazy_init_pending:
-                raise ValueError("FSDP2 lazy initialization was requested but model._lazy_init_pending is False")
+                raise ValueError(
+                    "FSDP2 lazy initialization was requested but model._lazy_init_pending is False"
+                )
 
             # we always generate and OSFT config since we have no usage in the current codebase
             # where we provide the osft config when calling from_pretrained
             osft_config = auto_generate_target_osft_config(
-                model, 
+                model,
                 model_name_or_class=pretrained_model_name_or_path,
                 target_patterns=target_patterns,
-                rank_ratio=rank_ratio
+                rank_ratio=rank_ratio,
             )
 
             model.osft_config = osft_config
@@ -1076,7 +1131,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if initialize_osft:
                 log_rank_0("initializing OSFT model")
                 if fsdp2_lazy_init:
-                    log_rank_0("distributed loading strategy enabled, loading state dict on rank 0 and preparing to distribute to all ranks")
+                    log_rank_0(
+                        "distributed loading strategy enabled, loading state dict on rank 0 and preparing to distribute to all ranks"
+                    )
                     model._pre_fsdp2_wrap_initialize_lazy_osft()
                     model._pre_fsdp2_wrap_synchronize_buffers()
                     log_rank_0("✅ Prepared OSFT model for distributed loading")
@@ -1084,7 +1141,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     model.reinitialize_osft(decompose_existing_weights=True)
                     log_rank_0("✅ OSFT model initialized successfully")
             return model
-
 
         @staticmethod
         def compute_distributed_svd(
@@ -1102,8 +1158,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     For all other ranks, the mapping will be to meta devices.
 
             """
-            log_rank_0("🔄 [compute_distributed_svd] Starting distributed SVD computation")
-            
+            log_rank_0(
+                "🔄 [compute_distributed_svd] Starting distributed SVD computation"
+            )
+
             # Helfpul vars
             current_rank = dist.get_rank()
             local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -1134,15 +1192,24 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             # Sanity check:
             # We need to make sure that we clear the data of the old parameters as we move
-            # each param from rank 0 to the intended target. 
+            # each param from rank 0 to the intended target.
             if is_main_proc:
                 if any(k in rank0_og_osft_state_dict for k in params_to_compute.keys()):
-                    raise ValueError("key still in rank0_og_osft_state_dict after removing it")
- 
+                    raise ValueError(
+                        "key still in rank0_og_osft_state_dict after removing it"
+                    )
+
             # At this point we should have OSFT params to train. If not, raise an error
             # since this degenerates down to SFT if not managed
-            if not any([x.role == "osft_target" for x in dist_model.orig_param_registry.values()]):
-                raise ValueError("No OSFT target parameters found in orig_param_registry")
+            if not any(
+                [
+                    x.role == "osft_target"
+                    for x in dist_model.orig_param_registry.values()
+                ]
+            ):
+                raise ValueError(
+                    "No OSFT target parameters found in orig_param_registry"
+                )
             if len(dist_model.orig_param_registry) == 0:
                 raise ValueError("orig_param_registry is empty")
             if len(params_to_compute) == 0:
@@ -1151,10 +1218,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # The following section assigns each rank in the process group a set of
             # parameters to compute the SVD on. This will determine where rank 0 sends the data.
 
- 
             # Compute the assignments
             params_per_rank = len(params_to_compute) // world_size
-            params_to_compute_list = list[tuple[str, torch.Tensor]](params_to_compute.items())
+            params_to_compute_list = list[tuple[str, torch.Tensor]](
+                params_to_compute.items()
+            )
             work_assignments = []
             for rank_idx in range(world_size):
                 start_idx = rank_idx * params_per_rank
@@ -1165,7 +1233,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     end_idx = start_idx + params_per_rank
                 work_assignments.append(params_to_compute_list[start_idx:end_idx])
 
-            log_rank_0(f"📊 [compute_distributed_svd] Distributing work across {world_size} ranks")
+            log_rank_0(
+                f"📊 [compute_distributed_svd] Distributing work across {world_size} ranks"
+            )
             log_rank_0(f"   • Total parameters: {len(params_to_compute)}")
             log_rank_0(f"   • Parameters per rank (base): {params_per_rank}")
             log_rank_0(f"   • Last rank gets: {len(work_assignments[-1])} parameters")
@@ -1183,19 +1253,21 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     # main process doesn't need to send
                     if is_main_proc:
                         my_work = assignment
-                    
+
                     # Equally clear this out
                     work_assignments[target_rank] = None
                     continue
-                
+
                 mailbox = [None]
-                
+
                 # transfer logic:
                 #   main proc: sends the names + tensors assigned to the proc and deletes the data afterwards
                 #   non-main proc: receives the data and prepares to process it in the next step
                 if is_main_proc:
                     mailbox = [assignment]
-                    dist.send_object_list(mailbox, dst=target_rank, use_batch=True, group=control_pg)
+                    dist.send_object_list(
+                        mailbox, dst=target_rank, use_batch=True, group=control_pg
+                    )
 
                     # delete params from local list
                     mailbox.pop()
@@ -1204,29 +1276,35 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         _, param = assignment.pop()
                         del param
                         param = None
-                    
+
                     # null the respective assignment entry
                     work_assignments[target_rank] = None
-                    
+
                     # garbage collection
                     torch.cuda.empty_cache()
                     gc.collect()
 
                 elif target_rank == current_rank:
                     # target ranks sends
-                    dist.recv_object_list(mailbox, src=main_proc_rank, use_batch=True, group=control_pg)
+                    dist.recv_object_list(
+                        mailbox, src=main_proc_rank, use_batch=True, group=control_pg
+                    )
                     my_work = mailbox.pop()
 
                 # everyone else waits until they're done
                 dist.barrier()
 
-            log_rank_0("✅ [compute_distributed_svd] Work distribution complete, starting SVD computation")
+            log_rank_0(
+                "✅ [compute_distributed_svd] Work distribution complete, starting SVD computation"
+            )
             # now each process computes the SVD separately
             processed_svd_dicts = {}
             for logical_key, param in my_work:
                 param_gpu = param.to(device=local_device)
-                svd_dict = dist_model.process_param_into_svd_dict(param_gpu, logical_key)
-                
+                svd_dict = dist_model.process_param_into_svd_dict(
+                    param_gpu, logical_key
+                )
+
                 # store it and make sure we don't have a lingering reference
                 processed_svd_dicts[logical_key] = svd_dict
 
@@ -1235,8 +1313,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 del param
                 torch.cuda.empty_cache()
                 gc.collect()
-            
-            log_rank_0("✅ [compute_distributed_svd] SVD computation complete, gathering results")
+
+            log_rank_0(
+                "✅ [compute_distributed_svd] SVD computation complete, gathering results"
+            )
             # by now, each rank has a mapping of logical keys --> new SVD params
             # worker procs need to return the processed dicts
             gathered_results = {}
@@ -1251,8 +1331,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 mailbox = [None]
                 if sender_rank == current_rank:
                     mailbox = [processed_svd_dicts]
-                    dist.send_object_list(mailbox, dst=main_proc_rank, use_batch=True, group=control_pg)
- 
+                    dist.send_object_list(
+                        mailbox, dst=main_proc_rank, use_batch=True, group=control_pg
+                    )
+
                     # now we delete the data from memory
                     for k in list(processed_svd_dicts.keys()):
                         w = processed_svd_dicts.pop(k)
@@ -1263,45 +1345,70 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     # empty cache and gc
                     torch.cuda.empty_cache()
                     gc.collect()
-                
+
                 # main process receives
                 elif is_main_proc:
-                    dist.recv_object_list(mailbox, src=sender_rank, use_batch=True, group=control_pg)
+                    dist.recv_object_list(
+                        mailbox, src=sender_rank, use_batch=True, group=control_pg
+                    )
                     gathered_results.update(mailbox.pop())
 
-            log_rank_0("[compute_distributed_svd] gathering SVD results from world onto main process")
+            log_rank_0(
+                "[compute_distributed_svd] gathering SVD results from world onto main process"
+            )
             # this is the final state dict
             finalized_sd = {}
             if is_main_proc:
                 for lk, svd_dict in gathered_results.items():
                     # we want to make sure we have this
                     if lk not in dist_model.osft_paramspec_registry:
-                        raise RuntimeError(f"key {lk} not in osft param registry, this is what exists:\n{dist_model.osft_paramspec_registry.keys()}")
+                        raise RuntimeError(
+                            f"key {lk} not in osft param registry, this is what exists:\n{dist_model.osft_paramspec_registry.keys()}"
+                        )
 
                     osft_spec = dist_model.osft_paramspec_registry[lk]
-                    
+
                     # get expected dtype from original parameter spec
-                    expected_dtype = dist_model.orig_param_registry[lk].dtype if lk in dist_model.orig_param_registry else None
-                    
+                    expected_dtype = (
+                        dist_model.orig_param_registry[lk].dtype
+                        if lk in dist_model.orig_param_registry
+                        else None
+                    )
+
                     # helper to convert dtype if needed
                     def ensure_dtype(tensor, expected_dtype):
                         if expected_dtype and tensor.dtype != expected_dtype:
                             return tensor.to(dtype=expected_dtype)
                         return tensor
-                    
-                    finalized_sd.update({
-                        osft_spec.U_low: ensure_dtype(svd_dict["U_low"], expected_dtype),
-                        osft_spec.S_low: ensure_dtype(svd_dict["S_low"], expected_dtype),
-                        osft_spec.V_low: ensure_dtype(svd_dict["V_low"], expected_dtype),
-                        osft_spec.U_high: ensure_dtype(svd_dict["U_high"], expected_dtype),
-                        osft_spec.S_high: ensure_dtype(svd_dict["S_high"], expected_dtype),
-                        osft_spec.V_high: ensure_dtype(svd_dict["V_high"], expected_dtype),
-                        osft_spec.rank_high: svd_dict["rank_high"],
-                    })
 
+                    finalized_sd.update(
+                        {
+                            osft_spec.U_low: ensure_dtype(
+                                svd_dict["U_low"], expected_dtype
+                            ),
+                            osft_spec.S_low: ensure_dtype(
+                                svd_dict["S_low"], expected_dtype
+                            ),
+                            osft_spec.V_low: ensure_dtype(
+                                svd_dict["V_low"], expected_dtype
+                            ),
+                            osft_spec.U_high: ensure_dtype(
+                                svd_dict["U_high"], expected_dtype
+                            ),
+                            osft_spec.S_high: ensure_dtype(
+                                svd_dict["S_high"], expected_dtype
+                            ),
+                            osft_spec.V_high: ensure_dtype(
+                                svd_dict["V_high"], expected_dtype
+                            ),
+                            osft_spec.rank_high: svd_dict["rank_high"],
+                        }
+                    )
 
             # finally, the main process distributes the state dict
-            log_rank_0("📤 [compute_distributed_svd] Distributing computed SVD data to sharded models")
+            log_rank_0(
+                "📤 [compute_distributed_svd] Distributing computed SVD data to sharded models"
+            )
             set_model_state_dict(
                 model=dist_model,
                 model_state_dict=finalized_sd,
@@ -1309,16 +1416,18 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     full_state_dict=True,
                     broadcast_from_rank0=True,
                     strict=False,
-                )
+                ),
             )
-            
-            log_rank_0("✅ [compute_distributed_svd] Distributed SVD computation complete!")
+
+            log_rank_0(
+                "✅ [compute_distributed_svd] Distributed SVD computation complete!"
+            )
 
         def _pre_fsdp2_wrap_synchronize_buffers(self):
             """
             This method populates the initial buffers which are on a meta-device with the true
-            buffers which were provided during memory-efficient initialization. 
-            Assumes that the buffers were synchronized during initialization properly, and 
+            buffers which were provided during memory-efficient initialization.
+            Assumes that the buffers were synchronized during initialization properly, and
             that user is already in a distributed environment.
 
             **Important**:
@@ -1330,31 +1439,43 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             for bk, data in self.lazy_init_buffer_dict.items():
                 mod, attr = self._get_module_by_name(bk)
                 if not mod:
-                    raise ValueError(f"requested module for buffer '{bk}' came back as None")
+                    raise ValueError(
+                        f"requested module for buffer '{bk}' came back as None"
+                    )
 
                 # checks that the current buffer IS meta
-                if (curr_buff := getattr(mod, attr, None)) is None or curr_buff.device.type != "meta":
-                    raise RuntimeError(f"expected buffer {attr} of module {mod} to be meta, but got: {curr_buff.device.type}")
+                if (
+                    curr_buff := getattr(mod, attr, None)
+                ) is None or curr_buff.device.type != "meta":
+                    raise RuntimeError(
+                        f"expected buffer {attr} of module {mod} to be meta, but got: {curr_buff.device.type}"
+                    )
 
                 # check expected dtype from registry
                 if bk in self.orig_param_registry:
                     expected_dtype = self.orig_param_registry[bk].dtype
                     if data.dtype != expected_dtype:
-                        log_rank_0(f"Converting buffer {bk} from {data.dtype} to {expected_dtype}")
+                        log_rank_0(
+                            f"Converting buffer {bk} from {data.dtype} to {expected_dtype}"
+                        )
                         data = data.to(dtype=expected_dtype)
-                
+
                 # this overwrites the buffer currently present (should be meta)
                 new_data = data.detach().clone()
                 mod.register_buffer(attr, new_data, persistent=True)
 
                 # checks that the current buffer IS meta
-                if (curr_buff := getattr(mod, attr, None)) is None or curr_buff.device.type == "meta":
-                    raise RuntimeError(f"expected buffer {attr} of module {mod} to be not meta, but got: {curr_buff.device.type}")
-
-
+                if (
+                    curr_buff := getattr(mod, attr, None)
+                ) is None or curr_buff.device.type == "meta":
+                    raise RuntimeError(
+                        f"expected buffer {attr} of module {mod} to be not meta, but got: {curr_buff.device.type}"
+                    )
 
         @staticmethod
-        def post_fsdp2_wrap_synchronize_state_dict_across_procs(dist_model: "ModelWithOSFT", og_state_dict: dict[str, torch.Tensor]):
+        def post_fsdp2_wrap_synchronize_state_dict_across_procs(
+            dist_model: "ModelWithOSFT", og_state_dict: dict[str, torch.Tensor]
+        ):
             """
             This method broadcasts non-OSFT params across all processes. After these are shared,
             they are cleared from the original state dict in order to free up memory.
@@ -1363,9 +1484,15 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if dist.get_rank() == 0:
                 # sanity check
                 # Check if all registered parameters are present in the state dict
-                missing_keys = [lk for lk in dist_model.orig_param_registry.keys() if lk not in og_state_dict]
+                missing_keys = [
+                    lk
+                    for lk in dist_model.orig_param_registry.keys()
+                    if lk not in og_state_dict
+                ]
                 if missing_keys:
-                    log_rank_0(f"\033[33m⚠️  WARNING ⚠️  Some registered parameters are missing from state dict: {missing_keys}\033[0m")
+                    log_rank_0(
+                        f"\033[33m⚠️  WARNING ⚠️  Some registered parameters are missing from state dict: {missing_keys}\033[0m"
+                    )
 
                 # now we need to share out all of the non-osft params
                 for lk, spec in dist_model.orig_param_registry.items():
@@ -1377,9 +1504,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     param_value = og_state_dict.pop(lk)
                     expected_dtype = spec.dtype
                     if param_value.dtype != expected_dtype:
-                        log_rank_0(f"Converting {lk} from {param_value.dtype} to {expected_dtype}")
+                        log_rank_0(
+                            f"Converting {lk} from {param_value.dtype} to {expected_dtype}"
+                        )
                         param_value = param_value.to(dtype=expected_dtype)
-                    
+
                     non_osft_sd[lk] = param_value
 
             # now the rank 0 proc shares the state dict
@@ -1390,7 +1519,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     broadcast_from_rank0=True,
                     strict=False,
                     full_state_dict=True,
-                )
+                ),
             )
 
             # keys to clear
@@ -1408,7 +1537,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             This method initializes our OSFT parameters as meta devices based on the OSFT config
             and populates the original parameter registry, which we use to recover
             the original model.
-            
+
             During the procedure for initializing lazy OSFT, we assume all devices on the state dict
             to be meta. Assuming this is the case, we then stage the original weight matrices to become
             OSFT params.
@@ -1418,8 +1547,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # verify everything is a meta device
             for k, p in self.state_dict().items():
                 if p.device.type != "meta":
-                    raise RuntimeError(f"excpected '{k}' to be a meta device, but got: {p.device}")
- 
+                    raise RuntimeError(
+                        f"excpected '{k}' to be a meta device, but got: {p.device}"
+                    )
+
             # once we've done this, the goal is to iterate through the parameters in the model
             # and place everything in the set of keys
 
@@ -1429,10 +1560,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 is_osft_param = pk in self.osft_config
                 param_role: Role = "osft_target" if is_osft_param else "non_osft"
                 self.orig_param_registry[pk] = ParamSpec(
-                    role=param_role,
-                    dtype=v.dtype,
-                    logical_key=pk,
-                    shape=v.shape
+                    role=param_role, dtype=v.dtype, logical_key=pk, shape=v.shape
                 )
 
                 # skip if it's not in the registry
@@ -1446,7 +1574,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 mod, attr = self._get_module_by_name(key)
                 self._register_osft_target(key, mod, attr)
                 self._prepare_osft_param(key)
-
 
         def reinitialize_osft(
             self, decompose_existing_weights: bool, assigned_params=None
@@ -1463,10 +1590,12 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             """
             log_rank_0("🔄 [reinitialize_osft] Starting OSFT reinitialization")
             log_rank_0(f"   • decompose_existing_weights: {decompose_existing_weights}")
-            log_rank_0(f"   • assigned_params: {len(assigned_params) if assigned_params else 'None (all params)'}")
+            log_rank_0(
+                f"   • assigned_params: {len(assigned_params) if assigned_params else 'None (all params)'}"
+            )
 
             self._reset_osft_metadata()
-            
+
             log_rank_0("🚀 [reinitialize_osft] Calling _initialize_osft_parameters")
             self._initialize_osft_parameters(
                 decompose_existing_weights=decompose_existing_weights,
@@ -1483,15 +1612,16 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             sequence when torch.distributed is active.
             """
             if not self.fsdp2_lazy_init:
-                raise RuntimeError("reinitialize_osft_distributed is only valid when fsdp2_lazy_init=True")
+                raise RuntimeError(
+                    "reinitialize_osft_distributed is only valid when fsdp2_lazy_init=True"
+                )
             self._pre_fsdp2_wrap_initialize_lazy_osft()
             self._pre_fsdp2_wrap_synchronize_buffers()
-
 
         @property
         def is_initialized(self):
             return not self._lazy_init_pending
-        
+
         @property
         def requires_fsdp2_initialization(self):
             """
@@ -1525,7 +1655,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             setattr(p, "_osft_key", logical_key)
             self._osft_handles[logical_key] = (weakref(module), attr)
 
-        def _record_osft_factor_spec(self, logical_key: str, attr: str) -> OSFTFactorSpec:
+        def _record_osft_factor_spec(
+            self, logical_key: str, attr: str
+        ) -> OSFTFactorSpec:
             """Create and store the factor spec describing where OSFT tensors live."""
             parent_logical_key = (
                 logical_key.rsplit(".", 1)[0] if "." in logical_key else ""
@@ -1547,7 +1679,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             self.osft_paramspec_registry[logical_key] = spec
             return spec
 
-        
         def eject_og_state_dict(self):
             """
             Removes the original state dict on the rank 0 process and returns it,
@@ -1559,8 +1690,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             sd = self._lazy_init_og_state_dict
             self._lazy_init_og_state_dict = None
             return sd
-                
-
 
         def _prepare_osft_param(self, logical_key: str):
             """
@@ -1571,7 +1700,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             mod = mod_ref()
             if mod is None:
                 raise ValueError(f"requested module {logical_key} but ref is None")
- 
+
             # next we register the parameter and remove the attribute
             meta_weight = getattr(mod, attr)
             top_K = self.osft_config[logical_key]
@@ -1583,12 +1712,18 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 upcast_dtype=torch.float32,
                 output_dtype=meta_weight.dtype,
             )
-            
+
             # next, we create a new module and register the parameters
             # TODO: move these no-grad params onto the SVD module
-            mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
-            mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
-            mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+            mod.register_parameter(
+                "osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False)
+            )
+            mod.register_parameter(
+                "osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False)
+            )
+            mod.register_parameter(
+                "osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False)
+            )
 
             # Trainable low-rank components
             module_svd = nn.Module()
@@ -1596,7 +1731,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             module_svd.S_low = svd_dict["S_low"]
             module_svd.V_low = svd_dict["V_low"]
             module_svd.rank_high = svd_dict["rank_high"]
-            
+
             # this we want to improve
             mod.add_module("osft_params", module_svd)
 
@@ -1607,7 +1742,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 def forward(x):
                     owner_mod, _ = self._get_module_by_logical_key(lkey)
                     if owner_mod is None:
-                        raise RuntimeError(f"Module for logical key '{lkey}' not found in handle registry")
+                        raise RuntimeError(
+                            f"Module for logical key '{lkey}' not found in handle registry"
+                        )
                     svd_dict = {
                         "U_high": owner_mod.osft_U_high,
                         "S_high": owner_mod.osft_S_high,
@@ -1618,11 +1755,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         "rank_high": owner_mod.osft_params.rank_high,
                     }
                     # retrieve bias dynamically to avoid meta tensor issues
-                    bias = getattr(owner_mod, 'bias', None)
+                    bias = getattr(owner_mod, "bias", None)
                     return self._factorized_linear(x, svd_dict, bias)
+
                 return forward
 
-            
             # update the forward
             mod.forward = make_forward(logical_key)
             meta_weight.requires_grad = False
@@ -1630,10 +1767,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             mod._parameters.pop(attr)
 
-
-
         @torch.no_grad()
-        def process_param_into_svd_dict(self, param: torch.Tensor, name: str) -> SVDDecompositionDict:
+        def process_param_into_svd_dict(
+            self, param: torch.Tensor, name: str
+        ) -> SVDDecompositionDict:
             # Perform SVD on GPU
             top_K = self.osft_config[name]
             svd_dict = create_svd_dict(
@@ -1642,12 +1779,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 decompose_existing=True,
                 upcast_dtype=self.upcast_dtype,
                 output_dtype=self.output_dtype,
-                use_meta=False
+                use_meta=False,
             )
             return svd_dict
 
-
-        def _get_module_by_name(self, name) -> tuple[nn.Module, str] | tuple[None, None]:
+        def _get_module_by_name(
+            self, name
+        ) -> tuple[nn.Module, str] | tuple[None, None]:
             """Helper to traverse and retrieve a module and its attribute by name string (e.g., `model.layers.0.attn.q_proj.weight`)."""
             parts = name.split(".")
             attr = parts[-1]
@@ -1660,7 +1798,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 else:
                     return None, None
             return mod, attr
-        
 
         def _initialize_osft_parameters(
             self, decompose_existing_weights: bool, assigned_params=None
@@ -1680,9 +1817,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 assigned_params (list, optional):
                     List of (name, param) tuples to process. If None, processes all parameters.
             """
-            log_rank_0("⚙️  [_initialize_osft_parameters] Starting parameter initialization")
+            log_rank_0(
+                "⚙️  [_initialize_osft_parameters] Starting parameter initialization"
+            )
             log_rank_0(f"   • decompose_existing_weights: {decompose_existing_weights}")
-            
+
             self._reset_osft_metadata()
 
             local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -1690,14 +1829,18 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             all_named_params = list(self.named_parameters())
             if assigned_params is not None:
                 named_params = assigned_params
-                log_rank_0(f"   • Processing {len(assigned_params)} assigned parameters")
+                log_rank_0(
+                    f"   • Processing {len(assigned_params)} assigned parameters"
+                )
             else:
                 named_params = all_named_params
                 log_rank_0(f"   • Processing all {len(named_params)} model parameters")
 
             # Populate registry metadata so later distributed utilities can rely on it
             for param_name, param in all_named_params:
-                role: Role = "osft_target" if param_name in self.osft_config else "non_osft"
+                role: Role = (
+                    "osft_target" if param_name in self.osft_config else "non_osft"
+                )
                 self.orig_param_registry[param_name] = ParamSpec(
                     role=role,
                     dtype=param.dtype,
@@ -1725,24 +1868,29 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             # Set up target device for memory-efficient operations
             local_rank = int(os.getenv("LOCAL_RANK", 0))
-            target_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+            target_device = (
+                torch.device("cuda", local_rank)
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            )
             log_rank_0(f"   • target_device: {target_device}")
-            
-            
+
             osft_params_processed = 0
             for name, param in named_params:
                 # Apply SVD only to 2D matrices in the target config (e.g., q_proj, down_proj, etc.)
                 if is_osft_param(name, param, self.osft_config):
                     top_k = self.osft_config[name]
-                    
+
                     # Memory monitoring before processing
                     if torch.cuda.is_available():
                         mem_before = torch.cuda.memory_allocated(target_device) / 1e9
-                        log_rank_0(f"🔄 Processing {name} with incremental GPU usage (top_k={top_k}) - GPU mem: {mem_before:.2f}GB")
-                        
+                        log_rank_0(
+                            f"🔄 Processing {name} with incremental GPU usage (top_k={top_k}) - GPU mem: {mem_before:.2f}GB"
+                        )
+
                     # Memory-efficient processing: move parameter to GPU temporarily for SVD
                     param_gpu = param.data.to(target_device)
-                        
+
                     # Perform SVD on GPU
                     svd_dict = create_svd_dict(
                         param_gpu,
@@ -1751,33 +1899,44 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         upcast_dtype=self.upcast_dtype,
                         output_dtype=self.output_dtype,
                     )
-                        
+
                     # Move SVD components to target device and clear GPU cache
                     for key in svd_dict:
                         if isinstance(svd_dict[key], torch.Tensor):
                             svd_dict[key] = svd_dict[key].to(target_device)
-                        
+
                     # Clear the temporary GPU + CPU tensor
                     del param_gpu
                     torch.cuda.empty_cache()
-                        
+
                     # Memory monitoring after processing
                     if torch.cuda.is_available():
                         mem_after = torch.cuda.memory_allocated(target_device) / 1e9
-                        log_rank_0(f"✅ Completed {name} - GPU mem: {mem_after:.2f}GB (freed: {mem_before-mem_after:.2f}GB)")
+                        log_rank_0(
+                            f"✅ Completed {name} - GPU mem: {mem_after:.2f}GB (freed: {mem_before - mem_after:.2f}GB)"
+                        )
                     safe_name = name.replace(".", "_")
                     self.name_mapping[name] = safe_name
 
                     # Attach OSFT components to the owning module so only block-local params materialize
                     mod, attr = self._get_module_by_name(name)
-                    
+
                     # Register this target in the handle registry for stable lookups
                     self._register_osft_target(name, mod, attr)
-                    
+
                     # High-rank frozen components
-                    mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
-                    mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
-                    mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+                    mod.register_parameter(
+                        "osft_U_high",
+                        nn.Parameter(svd_dict["U_high"], requires_grad=False),
+                    )
+                    mod.register_parameter(
+                        "osft_S_high",
+                        nn.Parameter(svd_dict["S_high"], requires_grad=False),
+                    )
+                    mod.register_parameter(
+                        "osft_V_high",
+                        nn.Parameter(svd_dict["V_high"], requires_grad=False),
+                    )
                     # Trainable low-rank components
                     module_svd = nn.Module()
                     module_svd.U_low = svd_dict["U_low"]
@@ -1794,7 +1953,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         def forward(x):
                             owner_mod, _ = self._get_module_by_logical_key(lkey)
                             if owner_mod is None:
-                                raise RuntimeError(f"Module for logical key '{lkey}' not found in handle registry")
+                                raise RuntimeError(
+                                    f"Module for logical key '{lkey}' not found in handle registry"
+                                )
                             svd_dict = {
                                 "U_high": owner_mod.osft_U_high,
                                 "S_high": owner_mod.osft_S_high,
@@ -1805,8 +1966,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                                 "rank_high": owner_mod.osft_params.rank_high,
                             }
                             # retrieve bias dynamically to avoid meta tensor issues
-                            bias = getattr(owner_mod, 'bias', None)
+                            bias = getattr(owner_mod, "bias", None)
                             return self._factorized_linear(x, svd_dict, bias)
+
                         return forward
 
                     mod.forward = make_forward(name)
@@ -1815,11 +1977,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     mod._parameters.pop(attr, None)
                     self._record_osft_factor_spec(name, attr)
                     torch.cuda.empty_cache()
-                    
+
                     osft_params_processed += 1
 
             # Barrier for synchronization in distributed setting
-            log_rank_0(f"✅ [_initialize_osft_parameters] Processed {osft_params_processed} OSFT parameters")
+            log_rank_0(
+                f"✅ [_initialize_osft_parameters] Processed {osft_params_processed} OSFT parameters"
+            )
             if dist.is_initialized():
                 torch.distributed.barrier()
                 log_rank_0("🔄 [_initialize_osft_parameters] All ranks synchronized")
@@ -1846,10 +2010,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     original = k
                     break
             if original is None:
-                raise ValueError(f"Could not find original name for safe name {safe_name}")
+                raise ValueError(
+                    f"Could not find original name for safe name {safe_name}"
+                )
             mod, _ = self._get_module_by_name(original)
             svd_dict = self.get_svd_dict_for_module(mod)
-            return reconstruct_weight_matrix(svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype)
+            return reconstruct_weight_matrix(
+                svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype
+            )
 
         def _reconstruct_weight(
             self,
@@ -1860,7 +2028,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             """Convenience wrapper to reconstruct using the original parameter name."""
             mod, _ = self._get_module_by_name(original_name)
             svd_dict = self.get_svd_dict_for_module(mod)
-            return reconstruct_weight_matrix(svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype)
+            return reconstruct_weight_matrix(
+                svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype
+            )
 
         def _factorized_linear(self, x, svd_dict, bias=None):
             """
@@ -1909,8 +2079,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if not hasattr(module, "osft_params"):
                 raise ValueError("Module does not have OSFT parameters attached")
             # Ensure module-local high-rank components exist (skip non-attached holders)
-            if not (hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high")):
-                raise ValueError("Module is missing OSFT high-rank tensors (U/S/V_high)")
+            if not (
+                hasattr(module, "osft_U_high")
+                and hasattr(module, "osft_S_high")
+                and hasattr(module, "osft_V_high")
+            ):
+                raise ValueError(
+                    "Module is missing OSFT high-rank tensors (U/S/V_high)"
+                )
             module_svd = module.osft_params
             S_high = module.osft_S_high
             rank_high = S_high.shape[0]
@@ -1921,7 +2097,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 "U_low": module_svd.U_low,
                 "S_low": module_svd.S_low,
                 "V_low": module_svd.V_low,
-                "rank_high": rank_high
+                "rank_high": rank_high,
             }
             return svd_dict
 
@@ -1934,8 +2110,12 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             """
             for module in self.modules():
                 # Only process real OSFT-attached linear modules, not the top-level container
-                if hasattr(module, "osft_params") and \
-                   hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                if (
+                    hasattr(module, "osft_params")
+                    and hasattr(module, "osft_U_high")
+                    and hasattr(module, "osft_S_high")
+                    and hasattr(module, "osft_V_high")
+                ):
                     try:
                         svd_dict = self.get_svd_dict_for_module(module)
                     except ValueError:
@@ -1947,7 +2127,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""
             log_rank_0("Reconstructing OSFT weights for checkpoint saving...")
-            
+
             # Process parameters one at a time to minimize peak memory usage
             main_local_rank = int(os.getenv("LOCAL_RANK", 0))
             for i, (orig, osft_factors) in enumerate(
@@ -1957,8 +2137,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     disable=main_local_rank != 0,
                 )
             ):
-                
-
                 # Extract SVD components from CPU state_dict (avoid touching FSDP sharded params)
                 U_high = state_dict.pop(osft_factors.U_high)
                 S_high = state_dict.pop(osft_factors.S_high)
@@ -1979,17 +2157,20 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     upcast_dtype=self.upcast_dtype,
                 )
                 state_dict[orig] = W
-                
 
                 # Clear GPU cache every few parameters to prevent accumulation
                 if (i + 1) % OSFT_CACHE_CLEAR_INTERVAL == 0:
                     torch.cuda.empty_cache()
-                    log_rank_0(f"Processed {i + 1}/{len(self.osft_paramspec_registry)} OSFT parameters")
-            
+                    log_rank_0(
+                        f"Processed {i + 1}/{len(self.osft_paramspec_registry)} OSFT parameters"
+                    )
+
             # Final cleanup
             torch.cuda.empty_cache()
-            log_rank_0(f"Finished reconstructing {len(self.osft_paramspec_registry)} OSFT parameters")
-            
+            log_rank_0(
+                f"Finished reconstructing {len(self.osft_paramspec_registry)} OSFT parameters"
+            )
+
             return state_dict
 
     ModelWithOSFT.__name__ = f"{base_cls.__name__}WithOSFT"
