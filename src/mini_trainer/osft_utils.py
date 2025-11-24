@@ -1864,91 +1864,45 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
         def _factorized_linear(self, x, svd_dict, bias=None):
             """
-            Memory-efficient factorized linear operation using SVD components.
-            
-            Computes: x @ (U_high @ S_high @ V_high + U_low @ S_low @ V_low)
-            As: (x @ V_high.T) @ (S_high @ U_high.T) + (x @ V_low.T) @ (S_low @ U_low.T)
-            
-            This avoids reconstructing the full weight matrix, using only rank-sized intermediates.
-            Handles both 2D and 3D input tensors (batch_size, seq_len, hidden_dim).
+            Efficient factorized linear operation using SVD components.
+
+            Computes: x @ (U_high @ S_high @ V_high + U_low @ S_low @ V_low).T + bias
+            As: (x @ V_high.T) @ (S_high * U_high).T + (x @ V_low.T) @ (S_low * U_low).T
             """
+            # Extract components
             U_high = svd_dict["U_high"]
             S_high = svd_dict["S_high"]
             V_high = svd_dict["V_high"]
             U_low = svd_dict["U_low"]
             S_low = svd_dict["S_low"]
             V_low = svd_dict["V_low"]
-            
-            # Ensure all tensors are on the same device and dtype as input
+
             device = x.device
             dtype = x.dtype
-            
-            # Handle both 2D and 3D input tensors
-            original_shape = x.shape
-            if x.dim() == 3:
-                # Flatten 3D input [batch, seq, hidden] -> [batch*seq, hidden] 
-                batch_size, seq_len, hidden_dim = x.shape
-                x_flat = x.view(-1, hidden_dim)
-            elif x.dim() == 2:
-                x_flat = x
-                batch_size, seq_len = None, None
-            else:
-                raise ValueError(f"Input tensor must be 2D or 3D, got {x.dim()}D")
-            
-            # Cast to appropriate dtypes for computation
-            upcast_dtype = self.upcast_dtype
-            target_dtype = dtype
-            
-            # High-rank component: x @ V_high.T @ (S_high @ U_high.T)
-            result = None
-            if U_high.numel() > 0 and S_high.numel() > 0:
-                # Cast to upcast dtype for numerical stability
-                V_high_work = V_high.to(device=device, dtype=upcast_dtype)
-                U_high_work = U_high.to(device=device, dtype=upcast_dtype)
-                S_high_work = S_high.to(device=device, dtype=upcast_dtype)
-                x_work = x_flat.to(upcast_dtype)
-                
-                # x @ V_high.T -> intermediate shape: (batch*seq, rank_high)
-                x_V = torch.mm(x_work, V_high_work.transpose(0, 1))
-                # (x @ V_high.T) @ (S_high @ U_high.T) -> final shape: (batch*seq, output_dim)
-                high_contrib = torch.mm(x_V * S_high_work.unsqueeze(0), U_high_work.transpose(0, 1))
-                result = high_contrib.to(target_dtype)
-            
-            # Low-rank component: x @ V_low.T @ (S_low @ U_low.T)
-            if U_low.numel() > 0 and S_low.numel() > 0:
-                # Cast to upcast dtype for numerical stability
-                V_low_work = V_low.to(device=device, dtype=upcast_dtype)
-                U_low_work = U_low.to(device=device, dtype=upcast_dtype)
-                S_low_work = S_low.to(device=device, dtype=upcast_dtype)
-                x_work = x_flat.to(upcast_dtype)
-                
-                # x @ V_low.T -> intermediate shape: (batch*seq, rank_low)
-                x_V = torch.mm(x_work, V_low_work.transpose(0, 1))
-                # (x @ V_low.T) @ (S_low @ U_low.T) -> final shape: (batch*seq, output_dim)
-                low_contrib = torch.mm(x_V * S_low_work.unsqueeze(0), U_low_work.transpose(0, 1))
-                low_contrib = low_contrib.to(target_dtype)
-                
-                if result is not None:
-                    result = result + low_contrib
-                else:
-                    result = low_contrib
-            
-            # Handle case where both components are empty (shouldn't happen in practice)
-            if result is None:
-                # Create zero output with correct shape
-                output_dim = U_high.size(0) if U_high.numel() > 0 else U_low.size(0)
-                result = torch.zeros(x_flat.size(0), output_dim, device=device, dtype=target_dtype)
-            
+
+            # Move to correct device (keep native dtype)
+            U_high = U_high.to(device=device)
+            S_high = S_high.to(device=device)
+            V_high = V_high.to(device=device)
+            U_low = U_low.to(device=device)
+            S_low = S_low.to(device=device)
+            V_low = V_low.to(device=device)
+
+            # High-rank path (frozen): x @ V_high.T -> (batch, seq, rank_high)
+            x_V_high = x @ V_high.transpose(0, 1)
+            result_high = (x_V_high * S_high) @ U_high.transpose(0, 1)
+
+            # Low-rank path (trainable): x @ V_low.T -> (batch, seq, rank_low)
+            x_V_low = x @ V_low.transpose(0, 1)
+            result_low = (x_V_low * S_low) @ U_low.transpose(0, 1)
+
+            # Combine both paths
+            result = result_high + result_low
+
             # Add bias if present
             if bias is not None:
-                bias_work = bias.to(device=device, dtype=target_dtype)
-                result = result + bias_work.unsqueeze(0)
-            
-            # Restore original shape if input was 3D
-            if len(original_shape) == 3:
-                output_dim = result.size(-1)
-                result = result.view(batch_size, seq_len, output_dim)
-            
+                result = result + bias.to(device=device, dtype=dtype)
+
             return result
 
         def get_svd_dict_for_module(self, module) -> SVDDecompositionDict:
