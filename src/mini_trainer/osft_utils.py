@@ -25,11 +25,56 @@ from mini_trainer.fsdp2_lazy_init import (
 )
 
 import os
+import inspect
 
 # Memory optimization constants
 OSFT_CACHE_CLEAR_INTERVAL = int(
     os.getenv("OSFT_CACHE_CLEAR_INTERVAL", 5)
 )  # Clear GPU cache every N parameters during matrix reconstruction
+
+
+def _supports_use_batch() -> bool:
+    """Check if torch.distributed.send_object_list supports the use_batch parameter (PyTorch 2.9+)."""
+    sig = inspect.signature(dist.send_object_list)
+    return "use_batch" in sig.parameters
+
+
+# Cache the check since it won't change during runtime
+_USE_BATCH_SUPPORTED: bool | None = None
+
+
+def _get_use_batch_supported() -> bool:
+    """Get cached result of whether use_batch is supported."""
+    global _USE_BATCH_SUPPORTED
+    if _USE_BATCH_SUPPORTED is None:
+        _USE_BATCH_SUPPORTED = _supports_use_batch()
+    return _USE_BATCH_SUPPORTED
+
+
+def send_object_list_compat(
+    object_list: list, dst: int, group=None, use_batch: bool = True
+) -> None:
+    """
+    Version-compatible wrapper for torch.distributed.send_object_list.
+    Uses use_batch parameter on PyTorch 2.9+ for better performance.
+    """
+    if _get_use_batch_supported():
+        dist.send_object_list(object_list, dst=dst, group=group, use_batch=use_batch)
+    else:
+        dist.send_object_list(object_list, dst=dst, group=group)
+
+
+def recv_object_list_compat(
+    object_list: list, src: int, group=None, use_batch: bool = True
+) -> None:
+    """
+    Version-compatible wrapper for torch.distributed.recv_object_list.
+    Uses use_batch parameter on PyTorch 2.9+ for better performance.
+    """
+    if _get_use_batch_supported():
+        dist.recv_object_list(object_list, src=src, group=group, use_batch=use_batch)
+    else:
+        dist.recv_object_list(object_list, src=src, group=group)
 
 
 Role = t.Literal["osft_target", "non_osft"]
@@ -1265,7 +1310,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 #   non-main proc: receives the data and prepares to process it in the next step
                 if is_main_proc:
                     mailbox = [assignment]
-                    dist.send_object_list(
+                    send_object_list_compat(
                         mailbox, dst=target_rank, use_batch=True, group=control_pg
                     )
 
@@ -1286,7 +1331,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                 elif target_rank == current_rank:
                     # target ranks sends
-                    dist.recv_object_list(
+                    recv_object_list_compat(
                         mailbox, src=main_proc_rank, use_batch=True, group=control_pg
                     )
                     my_work = mailbox.pop()
@@ -1331,7 +1376,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 mailbox = [None]
                 if sender_rank == current_rank:
                     mailbox = [processed_svd_dicts]
-                    dist.send_object_list(
+                    send_object_list_compat(
                         mailbox, dst=main_proc_rank, use_batch=True, group=control_pg
                     )
 
@@ -1348,7 +1393,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                 # main process receives
                 elif is_main_proc:
-                    dist.recv_object_list(
+                    recv_object_list_compat(
                         mailbox, src=sender_rank, use_batch=True, group=control_pg
                     )
                     gathered_results.update(mailbox.pop())
