@@ -37,7 +37,16 @@ def _supports_use_batch() -> bool:
     try:
         # Parse major.minor from torch version (e.g., "2.9.0" -> (2, 9))
         version_parts = torch.__version__.split(".")[:2]
-        major, minor = int(version_parts[0]), int(version_parts[1].split("+")[0].split("a")[0].split("b")[0].split("rc")[0])
+        major, minor = (
+            int(version_parts[0]),
+            int(
+                version_parts[1]
+                .split("+")[0]
+                .split("a")[0]
+                .split("b")[0]
+                .split("rc")[0]
+            ),
+        )
         return (major, minor) >= (2, 9)
     except (ValueError, IndexError):
         return False
