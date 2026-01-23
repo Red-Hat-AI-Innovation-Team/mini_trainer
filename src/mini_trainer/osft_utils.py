@@ -34,8 +34,17 @@ OSFT_CACHE_CLEAR_INTERVAL = int(
 
 def _supports_use_batch() -> bool:
     """Check if torch.distributed send/recv_object_list support the use_batch parameter (PyTorch 2.9+)."""
+    # Try signature probe first (handles nightly/backported builds accurately)
     try:
-        # Parse major.minor from torch version (e.g., "2.9.0" -> (2, 9))
+        import inspect
+
+        sig = inspect.signature(dist.send_object_list)
+        return "use_batch" in sig.parameters
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # Fall back to version parsing
+    try:
         version_parts = torch.__version__.split(".")[:2]
         major, minor = (
             int(version_parts[0]),
@@ -65,11 +74,11 @@ def _get_use_batch_supported() -> bool:
 
 
 def send_object_list_compat(
-    object_list: list, dst: int, group=None, use_batch: bool = True
+    object_list: list, dst: int, group=None, use_batch: bool = False
 ) -> None:
     """
     Version-compatible wrapper for torch.distributed.send_object_list.
-    Uses use_batch parameter on PyTorch 2.9+ for better performance.
+    Passes use_batch parameter on PyTorch 2.9+ when specified.
     """
     if _get_use_batch_supported():
         dist.send_object_list(object_list, dst=dst, group=group, use_batch=use_batch)
@@ -78,11 +87,11 @@ def send_object_list_compat(
 
 
 def recv_object_list_compat(
-    object_list: list, src: int, group=None, use_batch: bool = True
+    object_list: list, src: int, group=None, use_batch: bool = False
 ) -> None:
     """
     Version-compatible wrapper for torch.distributed.recv_object_list.
-    Uses use_batch parameter on PyTorch 2.9+ for better performance.
+    Passes use_batch parameter on PyTorch 2.9+ when specified.
     """
     if _get_use_batch_supported():
         dist.recv_object_list(object_list, src=src, group=group, use_batch=use_batch)
