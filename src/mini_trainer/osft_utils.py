@@ -25,7 +25,6 @@ from mini_trainer.fsdp2_lazy_init import (
 )
 
 import os
-from packaging import version
 
 # Memory optimization constants
 OSFT_CACHE_CLEAR_INTERVAL = int(
@@ -35,7 +34,13 @@ OSFT_CACHE_CLEAR_INTERVAL = int(
 
 def _supports_use_batch() -> bool:
     """Check if torch.distributed send/recv_object_list support the use_batch parameter (PyTorch 2.9+)."""
-    return version.parse(torch.__version__) >= version.parse("2.9.0")
+    try:
+        # Parse major.minor from torch version (e.g., "2.9.0" -> (2, 9))
+        version_parts = torch.__version__.split(".")[:2]
+        major, minor = int(version_parts[0]), int(version_parts[1].split("+")[0].split("a")[0].split("b")[0].split("rc")[0])
+        return (major, minor) >= (2, 9)
+    except (ValueError, IndexError):
+        return False
 
 
 # Cache the check since it won't change during runtime
