@@ -1236,7 +1236,7 @@ def main(
 
     # Initialize logging flags
     use_wandb = wandb_project is not None
-    use_mlflow = mlflow_tracking_uri is not None
+    use_mlflow = any([mlflow_tracking_uri, mlflow_experiment_name, mlflow_run_name])
 
     # Log parameters only on rank 0
     local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -1304,7 +1304,8 @@ def main(
             log_rank_0(f"Initialized wandb project: {wandb_project}")
 
         # Initialize mlflow with the same params config
-        if use_mlflow:
+        # Only init on global rank 0 to avoid multiple runs in multi-node setups
+        if use_mlflow and global_rank == 0:
             mlflow_wrapper.init(
                 tracking_uri=mlflow_tracking_uri,
                 experiment_name=mlflow_experiment_name,
@@ -1433,7 +1434,8 @@ def main(
     # once done, tear down distributed environment
     if use_wandb:
         wandb_wrapper.finish()
-    if use_mlflow:
+    # Only finish mlflow on global rank 0 (where we started it)
+    if use_mlflow and torch.distributed.get_rank() == 0:
         mlflow_wrapper.finish()
     destroy_distributed_environment()
 
