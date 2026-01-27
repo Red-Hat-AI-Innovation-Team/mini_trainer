@@ -19,7 +19,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Store the active run ID to ensure we log to the correct run
+# Store the active run ID to ensure we can resume the run if needed
 # This is needed because async logging may lose the thread-local run context
 _active_run_id: Optional[str] = None
 
@@ -91,12 +91,8 @@ def log_params(params: Dict[str, Any]) -> None:
     check_mlflow_available("log params to mlflow")
     # MLflow params must be strings
     str_params = {k: str(v) for k, v in params.items()}
-    # Use the stored run ID to ensure we log to the correct run
-    if _active_run_id:
-        with mlflow.start_run(run_id=_active_run_id):
-            mlflow.log_params(str_params)
-    else:
-        mlflow.log_params(str_params)
+    # Log directly - the run should already be active from init()
+    mlflow.log_params(str_params)
 
 
 def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -119,12 +115,18 @@ def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
         except (ValueError, TypeError):
             pass  # Skip non-numeric values
     if metrics:
-        # Use the stored run ID to ensure we log to the correct run
-        # This is critical for async logging where thread-local context may be lost
-        if _active_run_id:
+        # Check if there's an active run
+        active_run = mlflow.active_run()
+        if active_run:
+            # Run is active, log directly
+            mlflow.log_metrics(metrics, step=step)
+        elif _active_run_id:
+            # No active run in this thread but we have a stored run ID - resume it
+            # This can happen in async contexts where thread-local context is lost
             with mlflow.start_run(run_id=_active_run_id):
                 mlflow.log_metrics(metrics, step=step)
         else:
+            # No run context at all - log anyway (MLflow will create a run)
             mlflow.log_metrics(metrics, step=step)
 
 
