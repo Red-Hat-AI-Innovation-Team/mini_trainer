@@ -19,6 +19,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Store the active run ID to ensure we log to the correct run
+# This is needed because async logging may lose the thread-local run context
+_active_run_id: Optional[str] = None
+
 
 class MLflowNotAvailableError(ImportError):
     """Raised when mlflow functions are called but mlflow is not installed."""
@@ -58,12 +62,20 @@ def init(
     Raises:
         MLflowNotAvailableError: If mlflow is not installed
     """
+    global _active_run_id
     check_mlflow_available("initialize mlflow")
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
     if experiment_name:
         mlflow.set_experiment(experiment_name)
-    return mlflow.start_run(run_name=run_name, **kwargs)
+    run = mlflow.start_run(run_name=run_name, **kwargs)
+    _active_run_id = run.info.run_id
+    return run
+
+
+def get_active_run_id() -> Optional[str]:
+    """Get the active run ID that was started by init()."""
+    return _active_run_id
 
 
 def log_params(params: Dict[str, Any]) -> None:
@@ -79,7 +91,12 @@ def log_params(params: Dict[str, Any]) -> None:
     check_mlflow_available("log params to mlflow")
     # MLflow params must be strings
     str_params = {k: str(v) for k, v in params.items()}
-    mlflow.log_params(str_params)
+    # Use the stored run ID to ensure we log to the correct run
+    if _active_run_id:
+        with mlflow.start_run(run_id=_active_run_id):
+            mlflow.log_params(str_params)
+    else:
+        mlflow.log_params(str_params)
 
 
 def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -102,7 +119,13 @@ def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
         except (ValueError, TypeError):
             pass  # Skip non-numeric values
     if metrics:
-        mlflow.log_metrics(metrics, step=step)
+        # Use the stored run ID to ensure we log to the correct run
+        # This is critical for async logging where thread-local context may be lost
+        if _active_run_id:
+            with mlflow.start_run(run_id=_active_run_id):
+                mlflow.log_metrics(metrics, step=step)
+        else:
+            mlflow.log_metrics(metrics, step=step)
 
 
 def finish() -> None:
@@ -112,5 +135,7 @@ def finish() -> None:
     Raises:
         MLflowNotAvailableError: If mlflow is not installed
     """
+    global _active_run_id
     check_mlflow_available("finish mlflow run")
     mlflow.end_run()
+    _active_run_id = None
