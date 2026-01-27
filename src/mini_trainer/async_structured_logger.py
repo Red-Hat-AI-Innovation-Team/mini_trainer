@@ -75,14 +75,17 @@ class AsyncStructuredLogger:
             self.logs.append(data)
             await self._write_logs_to_file(data)
 
-            # log to wandb if enabled and wandb is initialized, but only log this on the MAIN rank
+            # log to wandb/mlflow if enabled, but only log this on the MAIN rank
+            # Guard rank checks when the process group isn't initialized (single-process runs)
+            is_rank0 = not dist.is_initialized() or dist.get_rank() == 0
+
             # wandb already handles timestamps so no need to include
-            if self.use_wandb and dist.get_rank() == 0:
+            if self.use_wandb and is_rank0:
                 wandb_data = {k: v for k, v in data.items() if k != "timestamp"}
                 wandb_wrapper.log(wandb_data)
 
             # log to mlflow if enabled, only on MAIN rank
-            if self.use_mlflow and dist.get_rank() == 0:
+            if self.use_mlflow and is_rank0:
                 step = data.get("step")
                 mlflow_data = {k: v for k, v in data.items() if k != "timestamp"}
                 mlflow_wrapper.log(mlflow_data, step=step)
