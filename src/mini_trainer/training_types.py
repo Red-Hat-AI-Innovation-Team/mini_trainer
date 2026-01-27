@@ -225,6 +225,17 @@ class TrainingArgs:
         default=None, metadata={"help": "Weights & Biases entity/team name."}
     )
 
+    # MLflow integration
+    mlflow_tracking_uri: Optional[str] = field(
+        default=None, metadata={"help": "MLflow tracking server URI."}
+    )
+    mlflow_experiment_name: Optional[str] = field(
+        default=None, metadata={"help": "MLflow experiment name."}
+    )
+    mlflow_run_name: Optional[str] = field(
+        default=None, metadata={"help": "MLflow run name."}
+    )
+
     # validation
     validation_split: float = field(
         default=0.0,

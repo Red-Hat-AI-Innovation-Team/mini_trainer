@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from typer import Typer, Option
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
-from mini_trainer import wandb_wrapper
+from mini_trainer import wandb_wrapper, mlflow_wrapper
 from tqdm import tqdm
 import torch
 import torch.distributed as dist
@@ -689,6 +689,7 @@ def train(
     save_best_val_loss: bool = False,
     val_loss_improvement_threshold: float = 0.0,
     use_wandb: bool = False,
+    use_mlflow: bool = False,
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
 ):
@@ -745,7 +746,9 @@ def train(
     world_size = int(os.environ["WORLD_SIZE"])
     is_local_main_process = int(os.getenv("LOCAL_RANK", 0)) == 0
     metric_logger = AsyncStructuredLogger(
-        output_dir + f"/training_metrics_{get_node_rank()}.jsonl", use_wandb=use_wandb
+        output_dir + f"/training_metrics_{get_node_rank()}.jsonl",
+        use_wandb=use_wandb,
+        use_mlflow=use_mlflow,
     )
 
     # initialize variables
@@ -1169,6 +1172,16 @@ def main(
     wandb_entity: Annotated[
         str | None, Option(help="Weights & Biases entity/team name")
     ] = None,
+    # mlflow parameters
+    mlflow_tracking_uri: Annotated[
+        str | None, Option(help="MLflow tracking server URI")
+    ] = None,
+    mlflow_experiment_name: Annotated[
+        str | None, Option(help="MLflow experiment name")
+    ] = None,
+    mlflow_run_name: Annotated[
+        str | None, Option(help="MLflow run name")
+    ] = None,
 ):
     # Reproducibility: align with HF Trainer seeding behavior
     set_seed(seed)
@@ -1223,8 +1236,9 @@ def main(
     osft_output_dtype_torch = parse_dtype(osft_output_dtype)
     train_dtype_torch = parse_dtype(train_dtype)
 
-    # Initialize use_wandb variable
+    # Initialize logging flags
     use_wandb = wandb_project is not None
+    use_mlflow = mlflow_tracking_uri is not None
 
     # Log parameters only on rank 0
     local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -1265,6 +1279,9 @@ def main(
             "wandb_project": wandb_project,
             "wandb_run_name": wandb_run_name,
             "wandb_entity": wandb_entity,
+            "mlflow_tracking_uri": mlflow_tracking_uri,
+            "mlflow_experiment_name": mlflow_experiment_name,
+            "mlflow_run_name": mlflow_run_name,
             "LOCAL_RANK": local_rank,
             "GLOBAL_RANK": global_rank,
             "NODE_RANK": node_rank,
@@ -1287,6 +1304,17 @@ def main(
                 config=params,
             )
             log_rank_0(f"Initialized wandb project: {wandb_project}")
+
+        # Initialize mlflow with the same params config
+        if use_mlflow:
+            mlflow_wrapper.init(
+                tracking_uri=mlflow_tracking_uri,
+                experiment_name=mlflow_experiment_name,
+                run_name=mlflow_run_name or wandb_run_name,  # fallback to wandb_run_name
+            )
+            # Log hyperparameters
+            mlflow_wrapper.log_params(params)
+            log_rank_0(f"Initialized mlflow with tracking URI: {mlflow_tracking_uri}")
 
         params_path = output_path / "training_params.json"
         with open(params_path, "w") as f:
@@ -1398,6 +1426,7 @@ def main(
         save_best_val_loss=save_best_val_loss,
         val_loss_improvement_threshold=val_loss_improvement_threshold,
         use_wandb=use_wandb,
+        use_mlflow=use_mlflow,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
     )
@@ -1405,6 +1434,8 @@ def main(
     # once done, tear down distributed environment
     if use_wandb:
         wandb_wrapper.finish()
+    if use_mlflow:
+        mlflow_wrapper.finish()
     destroy_distributed_environment()
 
 
