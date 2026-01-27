@@ -154,6 +154,14 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         if train_args.wandb_entity:
             command.append(f"--wandb-entity={train_args.wandb_entity}")
 
+    # mlflow-related arguments
+    if train_args.mlflow_tracking_uri:
+        command.append(f"--mlflow-tracking-uri={train_args.mlflow_tracking_uri}")
+        if train_args.mlflow_experiment_name:
+            command.append(f"--mlflow-experiment-name={train_args.mlflow_experiment_name}")
+        if train_args.mlflow_run_name:
+            command.append(f"--mlflow-run-name={train_args.mlflow_run_name}")
+
     # validation-related arguments
     if train_args.validation_split > 0.0:
         command.append(f"--validation-split={train_args.validation_split}")

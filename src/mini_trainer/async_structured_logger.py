@@ -14,20 +14,26 @@ from rich.console import Console
 from tqdm import tqdm
 
 # Local imports
-from mini_trainer import wandb_wrapper
+from mini_trainer import wandb_wrapper, mlflow_wrapper
 from mini_trainer.wandb_wrapper import check_wandb_available
+from mini_trainer.mlflow_wrapper import check_mlflow_available
 
 
 
 class AsyncStructuredLogger:
-    def __init__(self, file_name="training_log.jsonl", use_wandb=False):
+    def __init__(self, file_name="training_log.jsonl", use_wandb=False, use_mlflow=False):
         self.file_name = file_name
-        
+
         # wandb init is a special case -- if it is requested but unavailable,
         # we should error out early
         if use_wandb:
             check_wandb_available("initialize wandb")
         self.use_wandb = use_wandb
+
+        # mlflow init - same pattern as wandb
+        if use_mlflow:
+            check_mlflow_available("initialize mlflow")
+        self.use_mlflow = use_mlflow
 
         # Rich console for prettier output (force_terminal=True works with subprocess streaming)
         self.console = Console(force_terminal=True, force_interactive=False)
@@ -67,12 +73,18 @@ class AsyncStructuredLogger:
             data["timestamp"] = datetime.now().isoformat()
             self.logs.append(data)
             await self._write_logs_to_file(data)
-            
+
             # log to wandb if enabled and wandb is initialized, but only log this on the MAIN rank
             # wandb already handles timestamps so no need to include
             if self.use_wandb and dist.get_rank() == 0:
                 wandb_data = {k: v for k, v in data.items() if k != "timestamp"}
                 wandb_wrapper.log(wandb_data)
+
+            # log to mlflow if enabled, only on MAIN rank
+            if self.use_mlflow and dist.get_rank() == 0:
+                step = data.get("step")
+                mlflow_data = {k: v for k, v in data.items() if k != "timestamp"}
+                mlflow_wrapper.log(mlflow_data, step=step)
         except Exception as e:
             print(f"\033[1;38;2;0;255;255mError logging data: {e}\033[0m")
 
