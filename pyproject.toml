@@ -62,6 +62,7 @@ dev = [
     "tox-uv",
 ]
 wandb = ["wandb"]
+mlflow = ["mlflow"]
 
 [project.urls]
 Homepage = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer"
