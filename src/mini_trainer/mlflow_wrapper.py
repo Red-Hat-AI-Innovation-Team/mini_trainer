@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 # Try to import mlflow
 try:
     import mlflow
+
     MLFLOW_AVAILABLE = True
 except ImportError:
     MLFLOW_AVAILABLE = False
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 class MLflowNotAvailableError(ImportError):
     """Raised when mlflow functions are called but mlflow is not installed."""
+
     pass
 
 
@@ -39,7 +41,7 @@ def init(
     tracking_uri: Optional[str] = None,
     experiment_name: Optional[str] = None,
     run_name: Optional[str] = None,
-    **kwargs
+    **kwargs,
 ) -> Any:
     """
     Initialize an mlflow run. Raises MLflowNotAvailableError if mlflow is not installed.

@@ -1179,9 +1179,7 @@ def main(
     mlflow_experiment_name: Annotated[
         str | None, Option(help="MLflow experiment name")
     ] = None,
-    mlflow_run_name: Annotated[
-        str | None, Option(help="MLflow run name")
-    ] = None,
+    mlflow_run_name: Annotated[str | None, Option(help="MLflow run name")] = None,
 ):
     # Reproducibility: align with HF Trainer seeding behavior
     set_seed(seed)
@@ -1310,7 +1308,8 @@ def main(
             mlflow_wrapper.init(
                 tracking_uri=mlflow_tracking_uri,
                 experiment_name=mlflow_experiment_name,
-                run_name=mlflow_run_name or wandb_run_name,  # fallback to wandb_run_name
+                run_name=mlflow_run_name
+                or wandb_run_name,  # fallback to wandb_run_name
             )
             # Log hyperparameters
             mlflow_wrapper.log_params(params)
