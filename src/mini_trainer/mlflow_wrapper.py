@@ -115,8 +115,9 @@ def log_params(params: Dict[str, Any]) -> None:
     elif _active_run_id:
         # No active run in this thread but we have a stored run ID - resume it
         # This can happen in async contexts where thread-local context is lost
-        with mlflow.start_run(run_id=_active_run_id):
-            mlflow.log_params(str_params)
+        # Note: We don't use context manager here because it would end the run on exit
+        mlflow.start_run(run_id=_active_run_id)
+        mlflow.log_params(str_params)
     else:
         # No run context at all - log anyway (MLflow will create a run)
         mlflow.log_params(str_params)
@@ -150,8 +151,9 @@ def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
         elif _active_run_id:
             # No active run in this thread but we have a stored run ID - resume it
             # This can happen in async contexts where thread-local context is lost
-            with mlflow.start_run(run_id=_active_run_id):
-                mlflow.log_metrics(metrics, step=step)
+            # Note: We don't use context manager here because it would end the run on exit
+            mlflow.start_run(run_id=_active_run_id)
+            mlflow.log_metrics(metrics, step=step)
         else:
             # No run context at all - log anyway (MLflow will create a run)
             mlflow.log_metrics(metrics, step=step)
