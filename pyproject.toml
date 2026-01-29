@@ -34,7 +34,7 @@ dependencies = [
     "deprecated",
     "numpy",
     "datasets",
-    "transformers>=4.55.0",
+    "transformers>=5.0.0",
     "ninja",
     "numba>=0.62.0",
     "rich",

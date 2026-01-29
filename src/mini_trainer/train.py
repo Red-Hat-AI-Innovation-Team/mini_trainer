@@ -1,3 +1,4 @@
+import logging
 import time
 import os
 import sys
@@ -27,6 +28,9 @@ from mini_trainer.utils import (
     set_seed,
 )
 from mini_trainer.training_types import TrainingMode, PretrainingConfig
+
+# Suppress verbose HTTP request logs from httpx (used by huggingface_hub in transformers v5+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
 
