@@ -79,7 +79,9 @@ def init(
         mlflow.set_tracking_uri(effective_tracking_uri)
 
     # Apply kwarg > env var precedence for experiment_name
-    effective_experiment_name = experiment_name or os.environ.get("MLFLOW_EXPERIMENT_NAME")
+    effective_experiment_name = experiment_name or os.environ.get(
+        "MLFLOW_EXPERIMENT_NAME"
+    )
     if effective_experiment_name:
         mlflow.set_experiment(effective_experiment_name)
 
