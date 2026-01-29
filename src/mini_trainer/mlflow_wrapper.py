@@ -6,6 +6,7 @@ across all processes when mlflow is not installed.
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 # Try to import mlflow
@@ -50,9 +51,16 @@ def init(
     """
     Initialize an mlflow run. Raises MLflowNotAvailableError if mlflow is not installed.
 
+    Configuration follows a precedence hierarchy:
+        1. Explicit kwargs (highest priority)
+        2. Environment variables (MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME)
+        3. MLflow defaults (lowest priority)
+
     Args:
-        tracking_uri: MLflow tracking server URI (e.g., "http://localhost:5000")
-        experiment_name: Name of the experiment
+        tracking_uri: MLflow tracking server URI (e.g., "http://localhost:5000").
+            Falls back to MLFLOW_TRACKING_URI environment variable if not provided.
+        experiment_name: Name of the experiment.
+            Falls back to MLFLOW_EXPERIMENT_NAME environment variable if not provided.
         run_name: Name of the run
         **kwargs: Additional arguments to pass to mlflow.start_run
 
@@ -64,10 +72,17 @@ def init(
     """
     global _active_run_id
     check_mlflow_available("initialize mlflow")
-    if tracking_uri:
-        mlflow.set_tracking_uri(tracking_uri)
-    if experiment_name:
-        mlflow.set_experiment(experiment_name)
+
+    # Apply kwarg > env var precedence for tracking_uri
+    effective_tracking_uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
+    if effective_tracking_uri:
+        mlflow.set_tracking_uri(effective_tracking_uri)
+
+    # Apply kwarg > env var precedence for experiment_name
+    effective_experiment_name = experiment_name or os.environ.get("MLFLOW_EXPERIMENT_NAME")
+    if effective_experiment_name:
+        mlflow.set_experiment(effective_experiment_name)
+
     run = mlflow.start_run(run_name=run_name, **kwargs)
     _active_run_id = run.info.run_id
     return run
