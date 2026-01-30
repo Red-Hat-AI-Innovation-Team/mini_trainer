@@ -82,6 +82,8 @@ def init(
     if effective_experiment_name:
         mlflow.set_experiment(effective_experiment_name)
 
+    # Remove run_name from kwargs if present to avoid duplicate keyword argument
+    kwargs.pop("run_name", None)
     run = mlflow.start_run(run_name=run_name, **kwargs)
     _active_run_id = run.info.run_id
     return run
