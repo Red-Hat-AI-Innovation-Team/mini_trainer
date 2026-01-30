@@ -35,8 +35,7 @@ def check_mlflow_available(operation: str) -> None:
     """Check if mlflow is available, raise error if not."""
     if not MLFLOW_AVAILABLE:
         error_msg = (
-            f"Attempted to {operation} but mlflow is not installed. "
-            "Please install mlflow with: pip install mlflow"
+            f"Attempted to {operation} but mlflow is not installed. Please install mlflow with: pip install mlflow"
         )
         logger.error(error_msg)
         raise MLflowNotAvailableError(error_msg)
@@ -79,9 +78,7 @@ def init(
         mlflow.set_tracking_uri(effective_tracking_uri)
 
     # Apply kwarg > env var precedence for experiment_name
-    effective_experiment_name = experiment_name or os.environ.get(
-        "MLFLOW_EXPERIMENT_NAME"
-    )
+    effective_experiment_name = experiment_name or os.environ.get("MLFLOW_EXPERIMENT_NAME")
     if effective_experiment_name:
         mlflow.set_experiment(effective_experiment_name)
 
@@ -93,6 +90,29 @@ def init(
 def get_active_run_id() -> Optional[str]:
     """Get the active run ID that was started by init()."""
     return _active_run_id
+
+
+def _ensure_run_for_logging() -> None:
+    """
+    Ensure there's an active MLflow run for logging.
+
+    This helper checks if there's an active run in the current thread context.
+    If not, but we have a stored run ID from init(), it resumes that run.
+    This handles async contexts where thread-local run context may be lost.
+
+    If there's no active run and no stored run ID, this function does nothing
+    and lets MLflow create a new run automatically.
+    """
+    active_run = mlflow.active_run()
+    if active_run:
+        # Run is already active, nothing to do
+        return
+
+    if _active_run_id:
+        # No active run in this thread but we have a stored run ID - resume it
+        # This can happen in async contexts where thread-local context is lost
+        # Note: We don't use context manager here because it would end the run on exit
+        mlflow.start_run(run_id=_active_run_id)
 
 
 def log_params(params: Dict[str, Any]) -> None:
@@ -109,20 +129,9 @@ def log_params(params: Dict[str, Any]) -> None:
     # MLflow params must be strings
     str_params = {k: str(v) for k, v in params.items()}
 
-    # Check if there's an active run (same pattern as log() for async safety)
-    active_run = mlflow.active_run()
-    if active_run:
-        # Run is active, log directly
-        mlflow.log_params(str_params)
-    elif _active_run_id:
-        # No active run in this thread but we have a stored run ID - resume it
-        # This can happen in async contexts where thread-local context is lost
-        # Note: We don't use context manager here because it would end the run on exit
-        mlflow.start_run(run_id=_active_run_id)
-        mlflow.log_params(str_params)
-    else:
-        # No run context at all - log anyway (MLflow will create a run)
-        mlflow.log_params(str_params)
+    # Ensure we have an active run for logging
+    _ensure_run_for_logging()
+    mlflow.log_params(str_params)
 
 
 def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -145,20 +154,9 @@ def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
         except (ValueError, TypeError):
             pass  # Skip non-numeric values
     if metrics:
-        # Check if there's an active run
-        active_run = mlflow.active_run()
-        if active_run:
-            # Run is active, log directly
-            mlflow.log_metrics(metrics, step=step)
-        elif _active_run_id:
-            # No active run in this thread but we have a stored run ID - resume it
-            # This can happen in async contexts where thread-local context is lost
-            # Note: We don't use context manager here because it would end the run on exit
-            mlflow.start_run(run_id=_active_run_id)
-            mlflow.log_metrics(metrics, step=step)
-        else:
-            # No run context at all - log anyway (MLflow will create a run)
-            mlflow.log_metrics(metrics, step=step)
+        # Ensure we have an active run for logging
+        _ensure_run_for_logging()
+        mlflow.log_metrics(metrics, step=step)
 
 
 def finish() -> None:
