@@ -85,6 +85,10 @@ def init(
     if effective_experiment_name:
         mlflow.set_experiment(effective_experiment_name)
 
+    # Remove run_name from kwargs if present to avoid duplicate keyword argument
+    # The explicit run_name parameter takes precedence
+    kwargs.pop("run_name", None)
+
     # Reuse existing active run if one exists, otherwise start a new one
     active_run = mlflow.active_run()
     if active_run is not None:
@@ -98,6 +102,20 @@ def init(
 def get_active_run_id() -> Optional[str]:
     """Get the active run ID that was started by init()."""
     return _active_run_id
+
+
+def _ensure_run_for_logging() -> None:
+    """Ensure there's an active MLflow run for logging.
+
+    This helper handles async contexts where thread-local run context may be lost.
+    If no active run exists but we have a stored run ID, it resumes that run.
+    """
+    active_run = mlflow.active_run()
+    if not active_run and _active_run_id:
+        # No active run in this thread but we have a stored run ID - resume it
+        # This can happen in async contexts where thread-local context is lost
+        # Note: We don't use context manager here because it would end the run on exit
+        mlflow.start_run(run_id=_active_run_id)
 
 
 def log_params(params: Dict[str, Any]) -> None:
@@ -114,20 +132,8 @@ def log_params(params: Dict[str, Any]) -> None:
     # MLflow params must be strings
     str_params = {k: str(v) for k, v in params.items()}
 
-    # Check if there's an active run (same pattern as log() for async safety)
-    active_run = mlflow.active_run()
-    if active_run:
-        # Run is active, log directly
-        mlflow.log_params(str_params)
-    elif _active_run_id:
-        # No active run in this thread but we have a stored run ID - resume it
-        # This can happen in async contexts where thread-local context is lost
-        # Note: We don't use context manager here because it would end the run on exit
-        mlflow.start_run(run_id=_active_run_id)
-        mlflow.log_params(str_params)
-    else:
-        # No run context at all - log anyway (MLflow will create a run)
-        mlflow.log_params(str_params)
+    _ensure_run_for_logging()
+    mlflow.log_params(str_params)
 
 
 def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -150,20 +156,8 @@ def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
         except (ValueError, TypeError):
             pass  # Skip non-numeric values
     if metrics:
-        # Check if there's an active run
-        active_run = mlflow.active_run()
-        if active_run:
-            # Run is active, log directly
-            mlflow.log_metrics(metrics, step=step)
-        elif _active_run_id:
-            # No active run in this thread but we have a stored run ID - resume it
-            # This can happen in async contexts where thread-local context is lost
-            # Note: We don't use context manager here because it would end the run on exit
-            mlflow.start_run(run_id=_active_run_id)
-            mlflow.log_metrics(metrics, step=step)
-        else:
-            # No run context at all - log anyway (MLflow will create a run)
-            mlflow.log_metrics(metrics, step=step)
+        _ensure_run_for_logging()
+        mlflow.log_metrics(metrics, step=step)
 
 
 def finish() -> None:
