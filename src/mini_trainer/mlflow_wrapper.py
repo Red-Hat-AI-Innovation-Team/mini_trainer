@@ -85,7 +85,12 @@ def init(
     if effective_experiment_name:
         mlflow.set_experiment(effective_experiment_name)
 
-    run = mlflow.start_run(run_name=run_name, **kwargs)
+    # Reuse existing active run if one exists, otherwise start a new one
+    active_run = mlflow.active_run()
+    if active_run is not None:
+        run = active_run
+    else:
+        run = mlflow.start_run(run_name=run_name, **kwargs)
     _active_run_id = run.info.run_id
     return run
 
