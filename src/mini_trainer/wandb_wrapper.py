@@ -29,7 +29,7 @@ def check_wandb_available(operation: str) -> None:
     if not WANDB_AVAILABLE:
         error_msg = (
             f"Attempted to {operation} but wandb is not installed. "
-            "Please install wandb with: pip install 'mini-trainer[wandb]'"
+            "Please install wandb with: pip install wandb"
         )
         logger.error(error_msg)
         raise WandbNotAvailableError(error_msg)

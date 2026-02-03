@@ -36,7 +36,7 @@ def check_mlflow_available(operation: str) -> None:
     if not MLFLOW_AVAILABLE:
         error_msg = (
             f"Attempted to {operation} but mlflow is not installed. "
-            "Please install mlflow with: pip install 'mini-trainer[mlflow]'"
+            "Please install mlflow with: pip install mlflow"
         )
         logger.error(error_msg)
         raise MLflowNotAvailableError(error_msg)
