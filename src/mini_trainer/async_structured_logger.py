@@ -85,9 +85,12 @@ class AsyncStructuredLogger:
                 wandb_wrapper.log(wandb_data)
 
             # log to mlflow if enabled, only on MAIN rank
+            # Filter out step from data since it's passed as a separate argument
             if self.use_mlflow and is_rank0:
                 step = data.get("step")
-                mlflow_data = {k: v for k, v in data.items() if k != "timestamp"}
+                mlflow_data = {
+                    k: v for k, v in data.items() if k not in ("timestamp", "step")
+                }
                 mlflow_wrapper.log(mlflow_data, step=step)
         except Exception as e:
             print(f"\033[1;38;2;0;255;255mError logging data: {e}\033[0m")
