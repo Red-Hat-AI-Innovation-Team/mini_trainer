@@ -1,9 +1,14 @@
 from pathlib import Path
 
 import numpy as np
+import transformers
 import typer
 from datasets import load_dataset
 from transformers import AutoTokenizer
+
+# Transformers v5 renamed 'additional_special_tokens' to 'extra_special_tokens'
+_TRANSFORMERS_V5 = int(transformers.__version__.split(".")[0]) >= 5
+_SPECIAL_TOKENS_KEY = "extra_special_tokens" if _TRANSFORMERS_V5 else "additional_special_tokens"
 
 app = typer.Typer()
 
@@ -235,7 +240,7 @@ def process_data(
 ):
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     assistant_tk_ids, user_tk_ids = infer_special_token_sequences(tokenizer)
-    tokenizer.add_special_tokens({"extra_special_tokens": [string_for_printing_masks]})
+    tokenizer.add_special_tokens({_SPECIAL_TOKENS_KEY: [string_for_printing_masks]})
     string_for_printing_masks_tk = tokenizer.encode(string_for_printing_masks, add_special_tokens=False)[0]
 
     dataset = load_dataset("json", data_files=input_jsonl, split="train")

@@ -53,7 +53,7 @@ def wrap_model_with_fsdp1(model: torch.nn.Module) -> FSDP:
     # Get transformer layer class for auto-wrap
     auto_wrap_policy = None
     if hasattr(model, "_no_split_modules") and model._no_split_modules:
-        layer_name = model._no_split_modules[0]
+        layer_name = next(iter(model._no_split_modules))
         layer_cls = get_module_class_from_name(model, layer_name)
         if layer_cls:
             auto_wrap_policy = functools.partial(transformer_auto_wrap_policy, transformer_layer_cls={layer_cls})
