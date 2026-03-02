@@ -28,6 +28,7 @@ from mini_trainer.osft_utils import (
     get_model_config,
     is_osft_param,
     optim_wrapper,
+    project_gradient_to_orthogonal_space,
 )
 from mini_trainer.setup_model_for_training import setup_model
 from mini_trainer.training_types import TorchrunArgs, TrainingArgs
@@ -1396,6 +1397,196 @@ class TestOSFTOrthogonality:
         summary = tracker.get_summary()
         assert "FAILED" in summary
         assert "param2" in summary
+
+
+class TestBatchedUAllReduce:
+    """Test batched U projection all-reduce in project_gradients."""
+
+    def _create_multi_target_model(self):
+        """Create a model with multiple OSFT targets of different shapes."""
+
+        class MultiLinearModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.small = nn.Linear(8, 8, bias=False)
+                self.medium = nn.Linear(16, 8, bias=False)
+                self.large = nn.Linear(16, 16, bias=False)
+                self.dtype = torch.float32
+                for layer in [self.small, self.medium, self.large]:
+                    nn.init.normal_(layer.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(MultiLinearModel)
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {
+            "small.weight": 4,
+            "medium.weight": 4,
+            "large.weight": 8,
+        }
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float64,
+            output_dtype=torch.float64,
+        )
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = 0.5
+        model.reinitialize_osft(decompose_existing_weights=True)
+        return model
+
+    def test_skip_u_flag_leaves_u_gradient_unprojected(self):
+        """skip_u=True should leave U_low gradient unchanged across all targets."""
+        torch.manual_seed(42)
+        model = self._create_multi_target_model()
+        model.train()
+
+        # Exercise all three targets so each has gradients
+        x8 = torch.randn(2, 8, dtype=torch.float64)
+        x16 = torch.randn(2, 16, dtype=torch.float64)
+        loss = model.small(x8).pow(2).sum() + model.medium(x16).pow(2).sum() + model.large(x16).pow(2).sum()
+        loss.backward()
+
+        checked = 0
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and module.osft_params.U_low.grad is not None:
+                grad_before = module.osft_params.U_low.grad.clone()
+                svd_dict = model.get_svd_dict_for_module(module)
+                project_gradient_to_orthogonal_space(svd_dict, skip_u=True)
+                assert torch.equal(module.osft_params.U_low.grad, grad_before), (
+                    "skip_u=True should not modify U_low gradient"
+                )
+                checked += 1
+        assert checked == 3, f"Expected 3 targets with U gradients, got {checked}"
+
+    def test_skip_u_still_projects_v(self):
+        """skip_u=True should still project V_low gradient onto orthogonal complement."""
+        torch.manual_seed(42)
+        model = self._create_multi_target_model()
+        model.train()
+
+        # Exercise all targets
+        x8 = torch.randn(2, 8, dtype=torch.float64)
+        x16 = torch.randn(2, 16, dtype=torch.float64)
+        loss = model.small(x8).pow(2).sum() + model.medium(x16).pow(2).sum() + model.large(x16).pow(2).sum()
+        loss.backward()
+
+        checked = 0
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and module.osft_params.V_low.grad is not None:
+                svd_dict = model.get_svd_dict_for_module(module)
+                project_gradient_to_orthogonal_space(svd_dict, skip_u=True)
+
+                # Verify projected gradient is orthogonal to row(V_high):
+                # dV @ V_high^T should be zero (each row of dV has no component
+                # in the row space of V_high).
+                dV = module.osft_params.V_low.grad
+                V_high = module.osft_V_high
+                overlap = torch.mm(dV, V_high.transpose(0, 1))
+                assert torch.allclose(overlap, torch.zeros_like(overlap), atol=1e-10), (
+                    f"Projected V gradient not orthogonal to V_high: max |dV @ V_high^T| = {overlap.abs().max():.2e}"
+                )
+                checked += 1
+        assert checked == 3, f"Expected 3 targets with V gradients, got {checked}"
+
+    def test_orthogonality_with_multiple_targets(self):
+        """Orthogonality must hold for all targets after project_gradients."""
+        model = self._create_multi_target_model()
+        model.train()
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
+        optim_wrapper(optimizer, model)
+
+        for step in range(1, 6):
+            x8 = torch.randn(2, 8, dtype=torch.float64)
+            x16 = torch.randn(2, 16, dtype=torch.float64)
+            # Exercise all three targets independently (different input dims)
+            loss = model.small(x8).pow(2).sum() + model.medium(x16).pow(2).sum() + model.large(x16).pow(2).sum()
+            loss.backward()
+            optimizer.step()
+
+            for module in model.modules():
+                if hasattr(module, "osft_V_high") and hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high"):
+                    check_parameter_orthogonality(model, module, step, tracker)
+            optimizer.zero_grad()
+
+        assert tracker.is_successful(), f"Orthogonality violated with batched U all-reduce:\n{tracker.get_summary()}"
+
+    def test_flatten_cat_split_roundtrip(self):
+        """Verify that the flatten/cat/split logic preserves coefficient values."""
+        shapes = [(4, 4), (4, 8), (8, 8)]
+        originals = [torch.randn(s) for s in shapes]
+        flat_parts = [c.flatten() for c in originals]
+        batched = torch.cat(flat_parts)
+
+        # Simulate split
+        offset = 0
+        for i, shape in enumerate(shapes):
+            numel = shape[0] * shape[1]
+            recovered = batched[offset : offset + numel].reshape(shape)
+            offset += numel
+            assert torch.equal(recovered, originals[i]), f"Round-trip failed for shape {shape}"
+
+    def test_batched_path_matches_unbatched(self, monkeypatch):
+        """The distributed batched path must produce identical gradients to the unbatched path.
+
+        Mocks dist to force the batched code path with a no-op all-reduce
+        (identity for single-rank), then compares against the non-distributed
+        reference.  Uses identical seeds to create two models with the same
+        initial state (avoids deepcopy issues with dynamic OSFT classes).
+        """
+        import torch.distributed as dist
+
+        # Create two identical models from the same seed
+        torch.manual_seed(99)
+        model_ref = self._create_multi_target_model()
+        model_ref.train()
+
+        torch.manual_seed(99)
+        model_bat = self._create_multi_target_model()
+        model_bat.train()
+
+        # Same input for both — generate AFTER model init so seed state is aligned
+        x8 = torch.randn(2, 8, dtype=torch.float64)
+        x16 = torch.randn(2, 16, dtype=torch.float64)
+
+        # Reference: unbatched (non-distributed) path
+        loss_ref = (
+            model_ref.small(x8).pow(2).sum() + model_ref.medium(x16).pow(2).sum() + model_ref.large(x16).pow(2).sum()
+        )
+        loss_ref.backward()
+        model_ref.project_gradients()  # takes non-distributed path
+
+        # Batched: same forward/backward, then mock dist to force batched path
+        loss_bat = (
+            model_bat.small(x8).pow(2).sum() + model_bat.medium(x16).pow(2).sum() + model_bat.large(x16).pow(2).sum()
+        )
+        loss_bat.backward()
+
+        monkeypatch.setattr(dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+        # No-op all_reduce: with a single real rank, the local value IS the
+        # global value, so identity is correct.
+        monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None: None)
+        model_bat.project_gradients()  # takes batched path
+
+        # Compare every projected gradient
+        for (n_ref, p_ref), (n_bat, p_bat) in zip(model_ref.named_parameters(), model_bat.named_parameters()):
+            assert n_ref == n_bat
+            if p_ref.grad is None and p_bat.grad is None:
+                continue
+            assert (p_ref.grad is None) == (p_bat.grad is None), (
+                f"Gradient presence mismatch on {n_ref}: "
+                f"ref={'present' if p_ref.grad is not None else 'None'}, "
+                f"bat={'present' if p_bat.grad is not None else 'None'}"
+            )
+            assert torch.equal(p_ref.grad, p_bat.grad), (
+                f"Gradient mismatch on {n_ref}: max |diff| = {(p_ref.grad - p_bat.grad).abs().max():.2e}"
+            )
 
 
 class TestLazyInitTokenizerAlignment:

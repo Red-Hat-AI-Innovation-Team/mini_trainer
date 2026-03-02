@@ -514,11 +514,33 @@ def reconstruct_weight_matrix(
     return reconstructed
 
 
-def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
+def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip_u: bool = False):
     """
-    Projects the gradient of the low-rank parameters (U_low, V_low) to be orthogonal to the frozen high-rank subspace.
+    Projects the gradient of the low-rank parameters (U_low, V_low) to be
+    orthogonal to the frozen high-rank subspace.
 
-    This step ensures that learning new tasks does not interfere with previously learned representations by enforcing an orthogonality constraint.
+    Implements the orthogonal gradient projection from Nayak et al.,
+    "Sculpting Subspaces: Constrained Full Fine-Tuning in LLMs for Continual
+    Learning" (arXiv:2504.07097, Eq. 4, Theorem 1).  The projection ensures
+    that weight updates lie in the orthogonal complement of the frozen singular
+    subspace, bounding catastrophic forgetting via the Hierarchy of Forgetting
+    Bounds (Theorem 1).
+
+    U projection uses the factored form  dU -= U_high @ (U_high^T @ dU)  with
+    a small (k, k_low) intermediate — the orthogonal complement projection
+    (I - U_high @ U_high^T) dU that removes the col(U_high) component
+    (cf. Edelman, Arias & Smith 1998, arXiv:physics/9806030, §2.5.1).
+
+    V projection must use the Gram-matrix form
+    dV -= dV @ (V_high^T @ V_high)  because FSDP2 shards V_high on dim-0
+    (the singular-vector dimension), making the factored form
+    dV -= (dV @ V_high^T) @ V_high  produce column-blocks rather than
+    partial sums — requiring an all-gather instead of an all-reduce.
+
+    Args:
+        svd_dict: Dictionary containing the SVD decomposition components.
+        skip_u: If True, skip U projection (caller handles it externally,
+            e.g. via batched all-reduce in distributed mode).
 
     TODO(osilkin): Add mixed-precision gradients here
     """
@@ -530,7 +552,7 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
     V_high = svd_dict["V_high"]
 
     # Project U_low gradients to space orthogonal to U_high
-    if svd_dict["U_low"].grad is not None:
+    if not skip_u and svd_dict["U_low"].grad is not None:
         dU = svd_dict["U_low"].grad
         # Support distributed tensors by operating on the local shard
         local_U_high = getattr(U_high, "to_local", lambda: U_high)()
@@ -551,7 +573,10 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
         else:
             dU.copy_(local_dU)
 
-    # Repeat projection for V_low using V_high
+    # Project V_low gradients to space orthogonal to row(V_high).
+    # V_high has shape (k, M) with orthonormal rows (from SVD).
+    # G = V_high^T @ V_high is the (M, M) orthogonal projector onto row(V_high).
+    # dV -= dV @ G  removes each row's component in that subspace.
     if svd_dict["V_low"].grad is not None:
         dV = svd_dict["V_low"].grad
         local_V_high = getattr(V_high, "to_local", lambda: V_high)()
@@ -1982,20 +2007,99 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             with the high-rank subspace encoding prior task knowledge.
 
             This method should be called after backpropagation and before optimizer step.
+
+            In distributed mode, U projection coefficients are batched into a single
+            all-reduce instead of one per OSFT target. For Llama-8B with 224 targets
+            this reduces 224 U all-reduce kernel launches to 1, cutting latency from
+            collective launch overhead. V projections continue per-module.
             """
+            is_distributed = dist.is_initialized() and dist.get_world_size() > 1
+
+            # Collect OSFT modules
+            osft_modules = []
             for module in self.modules():
-                # Only process real OSFT-attached linear modules, not the top-level container
                 if (
                     hasattr(module, "osft_params")
                     and hasattr(module, "osft_U_high")
                     and hasattr(module, "osft_S_high")
                     and hasattr(module, "osft_V_high")
                 ):
+                    osft_modules.append(module)
+
+            if not osft_modules:
+                return
+
+            # Non-distributed: project each module individually (no all-reduces)
+            if not is_distributed:
+                for module in osft_modules:
                     try:
                         svd_dict = self.get_svd_dict_for_module(module)
                     except ValueError as err:
                         raise ValueError(f"error in projecting gradients for module: {module}") from err
                     project_gradient_to_orthogonal_space(svd_dict)
+                return
+
+            # Distributed: batch U projection all-reduces.
+            #
+            # Batching is valid because all-reduce(SUM) distributes over
+            # concatenation: allreduce(cat([a, b])) = cat([allreduce(a),
+            # allreduce(b)]).  The per-target coefficient matrices are
+            # independent, so the batched result is mathematically identical
+            # to the unbatched path.
+            #
+            # Phase 1: Compute local U projection coefficients (no all-reduce yet).
+            # Each coeff = U_high^T @ dU is a (k, k_low) partial sum over the
+            # sharded N dimension (FSDP2 Shard(0) on U_high).
+            u_work = []  # (local_U_high, local_dU, dU, coeff_shape) per target
+            u_flat_parts = []
+            svd_dicts = []
+
+            for module in osft_modules:
+                try:
+                    svd_dict = self.get_svd_dict_for_module(module)
+                except ValueError as err:
+                    raise ValueError(f"error in projecting gradients for module: {module}") from err
+                svd_dicts.append(svd_dict)
+
+                if svd_dict["U_low"].grad is not None:
+                    dU = svd_dict["U_low"].grad
+                    U_high = svd_dict["U_high"]
+                    local_U_high = getattr(U_high, "to_local", lambda x=U_high: x)()
+                    local_dU = getattr(dU, "to_local", lambda x=dU: x)()
+
+                    proj_coeff = torch.mm(local_U_high.transpose(0, 1), local_dU)
+                    u_work.append((local_U_high, local_dU, dU, proj_coeff.shape))
+                    u_flat_parts.append(proj_coeff.flatten())
+
+            # Phase 2: Single batched all-reduce for all U coefficients
+            if u_flat_parts:
+                batched = torch.cat(u_flat_parts)
+                dist.all_reduce(batched, op=dist.ReduceOp.SUM)
+
+                # Phase 3: Split back and apply U projections
+                offset = 0
+                for local_U_high, local_dU, dU, coeff_shape in u_work:
+                    numel = coeff_shape[0] * coeff_shape[1]
+                    proj_coeff = batched[offset : offset + numel].reshape(coeff_shape)
+                    offset += numel
+
+                    local_dU.addmm_(local_U_high, proj_coeff, alpha=-1.0)
+
+                    if hasattr(dU, "_local_tensor"):
+                        dU._local_tensor.copy_(local_dU)
+                    else:
+                        dU.copy_(local_dU)
+
+                assert offset == batched.numel(), (
+                    f"Batch split consumed {offset} elements but tensor has {batched.numel()}"
+                )
+
+            # V projections: per-module (Gram matrix all-reduce per target).
+            # Reuse the shared function with skip_u=True to avoid code
+            # duplication — the V projection logic is identical to the
+            # non-batched path.
+            for svd_dict in svd_dicts:
+                project_gradient_to_orthogonal_space(svd_dict, skip_u=True)
 
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""
