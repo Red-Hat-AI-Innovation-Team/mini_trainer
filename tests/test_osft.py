@@ -1589,6 +1589,327 @@ class TestBatchedUAllReduce:
             )
 
 
+class TestVProjectionCache:
+    """Test V_high caching in factored V projection."""
+
+    def _create_simple_osft_model(self, hidden_size=32, rank_ratio=0.5):
+        """Create a simple model with OSFT for testing."""
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.linear = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.dtype = torch.float32
+                nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(SimpleModel)
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {"linear.weight": int(hidden_size * rank_ratio)}
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32,
+        )
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = rank_ratio
+        model.reinitialize_osft(decompose_existing_weights=True)
+        return model
+
+    def test_cache_populated_after_first_projection(self, monkeypatch):
+        """V_high cache should be set on the module after the first call."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        # Before projection: no cache
+        for module in model.modules():
+            if hasattr(module, "osft_params"):
+                assert not hasattr(module, "_osft_v_high_full")
+
+        # Forward + backward
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+
+        model.project_gradients()
+
+        # After projection: cache should exist
+        cached_count = 0
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full"):
+                cached_count += 1
+                V = module._osft_v_high_full
+                assert V.ndim == 2
+                # Cached V_high should match V_high shape (k_high, M)
+                assert V.shape == module.osft_V_high.shape
+        assert cached_count > 0
+
+    def test_cached_v_high_matches_original(self, monkeypatch):
+        """Cached V_high should be identical to the original V_high (single GPU)."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full") and hasattr(module, "osft_V_high"):
+                cached = module._osft_v_high_full
+                original = module.osft_V_high
+                assert torch.equal(cached, original), "Cached V_high differs from original"
+
+    def test_cache_smaller_than_gram(self, monkeypatch):
+        """Cached V_high (k_high, M) should be smaller than the Gram matrix (M, M)."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model(hidden_size=32, rank_ratio=0.5)
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full") and hasattr(module, "osft_V_high"):
+                V = module._osft_v_high_full
+                M = V.shape[1]
+                cache_elements = V.nelement()         # k_high * M
+                gram_elements = M * M                  # M * M
+                assert cache_elements < gram_elements, (
+                    f"Cache ({cache_elements}) should be smaller than Gram ({gram_elements})"
+                )
+
+    def test_factored_matches_gram_projection(self):
+        """Factored V projection should produce the same result as Gram-based projection."""
+        torch.manual_seed(42)
+        model = self._create_simple_osft_model(hidden_size=32, rank_ratio=0.5)
+        model.train()
+
+        # Get V_high for manual Gram-based projection
+        V_high = None
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                V_high = module.osft_V_high.clone()
+                break
+        assert V_high is not None
+
+        # Forward + backward
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+
+        # Save raw gradient before projection
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and hasattr(module, "osft_params"):
+                raw_dV = module.osft_params.V_low.grad.clone()
+                break
+
+        # Apply factored projection (the actual code path)
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and hasattr(module, "osft_params"):
+                factored_result = module.osft_params.V_low.grad.clone()
+                break
+
+        # Compute Gram-based projection manually for comparison
+        G = V_high.T @ V_high
+        gram_result = raw_dV - raw_dV @ G
+
+        assert torch.allclose(factored_result, gram_result, atol=1e-6), (
+            f"Factored and Gram projections differ: max diff = "
+            f"{(factored_result - gram_result).abs().max().item()}"
+        )
+
+    def test_factored_matches_gram_rectangular(self):
+        """Factored and Gram agree for rectangular weights (the down_proj-like 7x case).
+
+        For down_proj, N < M so k_high = min(N,M)/2 is small relative to M.
+        This exercises the high-ratio regime where the factored form saves 7x.
+        """
+        torch.manual_seed(42)
+        # Mimic down_proj shape ratio: N=16, M=56 → k_high=8, M=56 → ratio=7x
+        N, M = 16, 56
+        k_high = N // 2  # 8
+        k_low = N - k_high  # 8
+
+        # Create orthonormal V_high (k_high, M) via QR
+        V_high = torch.linalg.qr(torch.randn(M, k_high))[0].T  # (k_high, M)
+        assert V_high.shape == (k_high, M)
+
+        dV = torch.randn(k_low, M)
+
+        # Gram form: dV - dV @ (V_high^T @ V_high)
+        G = V_high.T @ V_high  # (M, M) = (56, 56)
+        gram_result = dV - dV @ G
+
+        # Factored form: dV - (dV @ V_high^T) @ V_high
+        coeff = dV @ V_high.T  # (k_low, k_high) = (8, 8)
+        factored_result = dV - coeff @ V_high
+
+        # Verify sizes confirm the 7x ratio
+        assert G.nelement() == M * M  # 3136
+        assert V_high.nelement() == k_high * M  # 448
+        assert G.nelement() / V_high.nelement() == M / k_high  # 7.0
+
+        assert torch.allclose(factored_result, gram_result, atol=1e-6), (
+            f"Factored and Gram differ for rectangular case: max diff = "
+            f"{(factored_result - gram_result).abs().max().item()}"
+        )
+
+    def test_projection_identical_with_and_without_cache(self, monkeypatch):
+        """Projection results should be identical whether or not the cache is used."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        torch.manual_seed(42)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        # Step 1: populates cache
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.SGD(osft_params, lr=1e-3)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # Step 2: uses cache — save projected gradient
+        x2 = torch.randn(4, 32)
+        loss2 = model.linear(x2).pow(2).sum()
+        loss2.backward()
+        model.project_gradients()
+
+        grad_with_cache = {}
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                grad_with_cache["V_low"] = module.osft_params.V_low.grad.clone()
+                grad_with_cache["U_low"] = module.osft_params.U_low.grad.clone()
+
+        # Now clear cache and redo the same step
+        optimizer.zero_grad()
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full"):
+                del module._osft_v_high_full
+
+        loss2b = model.linear(x2).pow(2).sum()
+        loss2b.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                assert torch.equal(module.osft_params.V_low.grad, grad_with_cache["V_low"]), (
+                    "V_low gradient differs with vs without cache"
+                )
+                assert torch.equal(module.osft_params.U_low.grad, grad_with_cache["U_low"]), (
+                    "U_low gradient differs with vs without cache"
+                )
+
+    def test_cache_disabled_by_default(self):
+        """Cache should not be populated when OSFT_CACHE_V is at its default (off)."""
+
+        model = self._create_simple_osft_model()
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            assert not hasattr(module, "_osft_v_high_full"), (
+                "Cache should not be populated when OSFT_CACHE_V is disabled"
+            )
+
+    def test_orthogonality_maintained_with_cache(self, monkeypatch):
+        """Orthogonality must hold across multiple steps with caching active."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
+        optim_wrapper(optimizer, model)
+
+        for step in range(1, 11):
+            x = torch.randn(4, 32)
+            loss = model.linear(x).pow(2).sum()
+            loss.backward()
+
+            # project_gradients is called inside optim_wrapper's step()
+            optimizer.step()
+
+            for module in model.modules():
+                if (
+                    hasattr(module, "osft_params")
+                    and hasattr(module, "osft_U_high")
+                    and hasattr(module, "osft_S_high")
+                    and hasattr(module, "osft_V_high")
+                ):
+                    check_parameter_orthogonality(model, module, step, tracker)
+
+            optimizer.zero_grad()
+
+        assert tracker.is_successful(), f"Orthogonality violated with V_high caching:\n{tracker.get_summary()}"
+
+    def test_cache_cleared_by_reset_osft_metadata(self, monkeypatch):
+        """_reset_osft_metadata must clear cached V_high tensors.
+
+        reinitialize_osft calls _reset_osft_metadata, which creates new V_high
+        tensors.  Any cached all-gathered V_high from the old decomposition
+        would be stale.  This test verifies the cache is cleared.
+        """
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        # Populate cache
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        # Verify cache exists
+        cached_modules = [m for m in model.modules() if hasattr(m, "_osft_v_high_full")]
+        assert len(cached_modules) > 0, "Cache should be populated before reset"
+
+        # _reset_osft_metadata is the mechanism reinitialize_osft uses
+        model._reset_osft_metadata()
+
+        # Cache must be gone
+        for module in model.modules():
+            assert not hasattr(module, "_osft_v_high_full"), "Cache was not cleared by _reset_osft_metadata"
+
+    def test_cache_not_in_state_dict(self, monkeypatch):
+        """Cached V_high tensors must not appear in model state_dict."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        # Verify cache exists
+        assert any(hasattr(m, "_osft_v_high_full") for m in model.modules())
+
+        # Verify it's not in state_dict
+        sd = model.state_dict()
+        for key in sd:
+            assert "_osft_v_high_full" not in key, f"Cache leaked into state_dict: {key}"
+
+
 class TestLazyInitTokenizerAlignment:
     """Ensure memory-efficient loading aligns tokenizers before broadcasting."""
 
