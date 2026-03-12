@@ -1969,12 +1969,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
         def _factorized_linear(self, x, svd_dict, bias=None):
             """
-            Efficient factorized linear operation using SVD components.
+            Optimized factorized linear with addmm_ fusion.
 
             Computes: x @ (U_high @ S_high @ V_high + U_low @ S_low @ V_low).T + bias
-            As: (x @ V_high.T) @ (S_high * U_high).T + (x @ V_low.T) @ (S_low * U_low).T
+            Using: 3 mm + 1 addmm_ + 2 mul_ = 6 kernel launches (fused where possible).
             """
-            # Extract components
             U_high = svd_dict["U_high"]
             S_high = svd_dict["S_high"]
             V_high = svd_dict["V_high"]
@@ -1985,7 +1984,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             device = x.device
             dtype = x.dtype
 
-            # Move to correct device (keep native dtype)
             U_high = U_high.to(device=device)
             S_high = S_high.to(device=device)
             V_high = V_high.to(device=device)
@@ -1995,7 +1993,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             # Flatten x to 2D for efficient mm/addmm_
             orig_shape = x.shape
-            x_2d = x.reshape(-1, orig_shape[-1])  # (B*S, K)
+            x_2d = x.reshape(-1, orig_shape[-1])
 
             # High-rank path (frozen)
             tmp_high = torch.mm(x_2d, V_high.transpose(0, 1))
@@ -2010,7 +2008,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # Reshape back to original batch dims
             result = result.reshape(*orig_shape[:-1], result.shape[-1])
 
-            # Add bias if present
             if bias is not None:
                 result = result + bias.to(device=device, dtype=dtype)
 
@@ -2131,12 +2128,48 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     f"Batch split consumed {offset} elements but tensor has {batched.numel()}"
                 )
 
-            # V projections: per-module (Gram matrix all-reduce per target).
-            # Reuse the shared function with skip_u=True to avoid code
-            # duplication — the V projection logic is identical to the
-            # non-batched path.
+            # V projections: batched all-reduce (same pattern as U above).
+            # Factored form: dV -= (dV @ V_high^T) @ V_high
+            # Batch all (dV @ V_high^T) coefficients into a single all-reduce.
+            v_work = []
+            v_flat_parts = []
+
             for svd_dict in svd_dicts:
-                project_gradient_to_orthogonal_space(svd_dict, skip_u=True)
+                if svd_dict["V_low"].grad is not None:
+                    dV = svd_dict["V_low"].grad
+                    V_high = svd_dict["V_high"]
+                    local_V_high = getattr(V_high, "to_local", lambda x=V_high: x)()
+                    local_dV = getattr(dV, "to_local", lambda x=dV: x)()
+
+                    dV_Vt = torch.mm(local_dV, local_V_high.transpose(0, 1))
+                    v_work.append((local_V_high, local_dV, dV, dV_Vt.shape))
+                    v_flat_parts.append(dV_Vt.flatten())
+
+            if v_flat_parts:
+                if is_distributed:
+                    batched_v = torch.cat(v_flat_parts)
+                    dist.all_reduce(batched_v, op=dist.ReduceOp.SUM)
+
+                    offset = 0
+                    for local_V_high, local_dV, dV, coeff_shape in v_work:
+                        numel = coeff_shape[0] * coeff_shape[1]
+                        dV_Vt = batched_v[offset:offset + numel].reshape(coeff_shape)
+                        offset += numel
+
+                        local_dV.addmm_(dV_Vt, local_V_high, alpha=-1.0)
+
+                        if hasattr(dV, "_local_tensor"):
+                            dV._local_tensor.copy_(local_dV)
+                        else:
+                            dV.copy_(local_dV)
+
+                    assert offset == batched_v.numel()
+                else:
+                    # Non-distributed: apply directly (no all-reduce needed)
+                    for local_V_high, local_dV, dV, coeff_shape in v_work:
+                        dV_Vt = v_flat_parts.pop(0).reshape(coeff_shape)
+                        local_dV.addmm_(dV_Vt, local_V_high, alpha=-1.0)
+                        dV.copy_(local_dV)
 
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""
