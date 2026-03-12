@@ -53,10 +53,15 @@ def validate_training_state(
         expected_optimizer_dtype: Expected dtype for optimizer state (usually float32 for numerical stability)
     """
     for name, param in model.named_parameters():
+        # FSDP2 MixedPrecisionPolicy stores params in original dtype (often fp32)
+        # and casts to param_dtype during forward/backward. Allow fp32 storage
+        # when training in lower precision.
         if param.requires_grad and param.dtype != expected_param_dtype:
-            raise ValueError(f"Parameter {name} is not in {expected_param_dtype}, got {param.dtype}")
+            if param.dtype != torch.float32:
+                raise ValueError(f"Parameter {name} is not in {expected_param_dtype}, got {param.dtype}")
         if param.grad is not None and param.grad.dtype != expected_param_dtype:
-            raise ValueError(f"Gradient {name} is not in {expected_param_dtype}, got {param.grad.dtype}")
+            if param.grad.dtype != torch.float32:
+                raise ValueError(f"Gradient {name} is not in {expected_param_dtype}, got {param.grad.dtype}")
 
     # Check optimizer state tensors - only for trainable parameters
     for p_obj, state in optimizer.state.items():
@@ -90,7 +95,8 @@ def take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=torch.floa
         model,
         optimizer,
         expected_param_dtype=expected_dtype,
-        expected_optimizer_dtype=expected_dtype,
+        # Optimizer states (exp_avg, exp_avg_sq) are always fp32 for numerical stability
+        expected_optimizer_dtype=torch.float32,
     )
     optimizer.zero_grad()
     return grad_norm

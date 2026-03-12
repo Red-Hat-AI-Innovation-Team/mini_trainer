@@ -581,22 +581,21 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip
 
     # Project V_low gradients to space orthogonal to row(V_high).
     # V_high has shape (k, M) with orthonormal rows (from SVD).
-    # G = V_high^T @ V_high is the (M, M) orthogonal projector onto row(V_high).
-    # dV -= dV @ G  removes each row's component in that subspace.
+    # Factored form: dV -= (dV @ V_high^T) @ V_high
+    # This avoids materializing the (M, M) Gram matrix G = V_high^T @ V_high.
     if svd_dict["V_low"].grad is not None:
         dV = svd_dict["V_low"].grad
         local_V_high = getattr(V_high, "to_local", lambda: V_high)()
         local_dV = getattr(dV, "to_local", lambda: dV)()
 
-        # Compute Gram matrix G = V_high^T @ V_high for global projection across row-sharded V_high
-        # Assumes column dimension is consistent across ranks (row sharding over singular vectors)
-        G_local = torch.mm(local_V_high.transpose(0, 1), local_V_high)
+        # Factored projection: dV -= (dV @ V_high^T) @ V_high
+        # Step 1: dV_Vt = dV @ V_high^T → (rank_low, rank_high) — small intermediate
+        dV_Vt = torch.mm(local_dV, local_V_high.transpose(0, 1))
         if dist.is_initialized() and dist.get_world_size() > 1:
-            dist.all_reduce(G_local, op=dist.ReduceOp.SUM)
+            dist.all_reduce(dV_Vt, op=dist.ReduceOp.SUM)
 
-        # Apply projection: dV = dV - dV @ G (use local shard of dV)
-        update = torch.mm(local_dV, G_local)
-        local_dV.add_(update, alpha=-1.0)
+        # Step 2: dV -= dV_Vt @ V_high — uses addmm_ to fuse subtraction
+        local_dV.addmm_(dV_Vt, local_V_high, alpha=-1.0)
 
         if hasattr(dV, "_local_tensor"):
             dV._local_tensor.copy_(local_dV)
@@ -781,6 +780,7 @@ def _load_model_memory_efficient(
     if load_dtype is None:
         raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
     final_base_kwargs["torch_dtype"] = load_dtype
+    final_base_kwargs["dtype"] = load_dtype  # transformers v5 uses dtype
 
     # initialize params to instance the OSFT model
     # global rank 0 process actually loads the model, and all other procs
@@ -1993,16 +1993,22 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             S_low = S_low.to(device=device)
             V_low = V_low.to(device=device)
 
-            # High-rank path (frozen): x @ V_high.T -> (batch, seq, rank_high)
-            x_V_high = x @ V_high.transpose(0, 1)
-            result_high = (x_V_high * S_high) @ U_high.transpose(0, 1)
+            # Flatten x to 2D for efficient mm/addmm_
+            orig_shape = x.shape
+            x_2d = x.reshape(-1, orig_shape[-1])  # (B*S, K)
 
-            # Low-rank path (trainable): x @ V_low.T -> (batch, seq, rank_low)
-            x_V_low = x @ V_low.transpose(0, 1)
-            result_low = (x_V_low * S_low) @ U_low.transpose(0, 1)
+            # High-rank path (frozen)
+            tmp_high = torch.mm(x_2d, V_high.transpose(0, 1))
+            tmp_high.mul_(S_high.unsqueeze(0))
+            result = torch.mm(tmp_high, U_high.transpose(0, 1))
 
-            # Combine both paths
-            result = result_high + result_low
+            # Low-rank path (trainable): fuse matmul + addition via addmm_
+            tmp_low = torch.mm(x_2d, V_low.transpose(0, 1))
+            tmp_low.mul_(S_low.unsqueeze(0))
+            result.addmm_(tmp_low, U_low.transpose(0, 1))
+
+            # Reshape back to original batch dims
+            result = result.reshape(*orig_shape[:-1], result.shape[-1])
 
             # Add bias if present
             if bias is not None:

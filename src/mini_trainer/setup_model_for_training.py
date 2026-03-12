@@ -673,7 +673,7 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
     # correct mixed-precision settings. So to circumvent this, we load the
     # original model's config separately
     original_config = AutoConfig.from_pretrained(model_name_or_path)
-    original_dtype = getattr(original_config, "torch_dtype", None)
+    original_dtype = getattr(original_config, "torch_dtype", None) or getattr(original_config, "dtype", None)
 
     # HF models return a torch.dtype from this field, but docs mark it as an optional string
     if original_dtype is not None and isinstance(original_dtype, str):
@@ -910,7 +910,8 @@ def setup_model(
 ) -> torch.nn.Module | OSFTModel:
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
-        "torch_dtype": train_dtype,  # Ensure models are loaded in the training dtype
+        "torch_dtype": train_dtype,  # kept for internal OSFT code that reads this key
+        "dtype": train_dtype,  # transformers v5 uses dtype for from_pretrained
     }
 
     # Get model config to check for GPT-OSS and set appropriate configurations
@@ -1135,9 +1136,14 @@ def setup_model(
     model = load_osft_model() if osft else load_standard_model()
 
     # here we handle configuring the save_dtype
-    model.config.torch_dtype = get_model_save_dtype(save_dtype, model_name_or_path)
-    if not model.config.torch_dtype:
-        raise ValueError("error: model does not have a `torch_dtype` setting, cannot save model in this dtype")
+    _save_dtype = get_model_save_dtype(save_dtype, model_name_or_path)
+    if not _save_dtype:
+        raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
+    # transformers v5 uses `dtype` instead of `torch_dtype`
+    if hasattr(model.config, "dtype"):
+        model.config.dtype = _save_dtype
+    else:
+        model.config.torch_dtype = _save_dtype
 
     # Freeze GPT-OSS router parameters BEFORE FSDP2 setup to avoid uniformity issues
     if is_gpt_oss:
