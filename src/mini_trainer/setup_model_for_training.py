@@ -68,9 +68,25 @@ def _apply_liger_kernels_if_requested(use_liger_kernels, model_config, base_mode
         ) from e
 
     model_type = getattr(model_config, "model_type", None)
+
+    # For VLM models that were extracted to their text backbone, the config
+    # may still carry the parent VLM model_type. Try the text_config's
+    # model_type as a fallback.
     apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(model_type)
     if apply_fn is None:
-        raise ValueError(f"Liger kernels do not support model type '{model_type}'.")
+        text_config = getattr(model_config, "text_config", None)
+        text_model_type = getattr(text_config, "model_type", None) if text_config else None
+        if text_model_type:
+            apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(text_model_type)
+            if apply_fn is not None:
+                model_type = text_model_type
+
+    if apply_fn is None:
+        log_rank_0(
+            f"⚠️  Liger kernels do not support model type '{model_type}' — "
+            f"skipping Liger optimization. Training will proceed without it."
+        )
+        return
 
     apply_signature = inspect.signature(apply_fn)
     liger_kwargs = {}

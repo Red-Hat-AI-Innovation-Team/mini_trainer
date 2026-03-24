@@ -19,10 +19,14 @@ from mini_trainer.utils import log_rank_0
 def is_vlm_with_causal_lm(config) -> bool:
     """Check if a model config is a VLM wrapping a CausalLM text backbone.
 
-    Returns True only when the top-level config is NOT in the CausalLM
-    mapping but its nested ``text_config`` IS.  Models that are directly
-    registered as CausalLM (even if they also have a text_config) return
-    False.
+    Returns True when the model needs VLM extraction to obtain the trainable
+    CausalLM sub-model.  This covers two cases:
+
+    1. The top-level config is NOT in the CausalLM mapping but its nested
+       ``text_config`` IS (e.g. Ministral-3 / Mistral3ForConditionalGeneration).
+    2. The top-level config IS in the CausalLM mapping, but the resolved class
+       is a ``ForConditionalGeneration`` VLM (e.g. Gemma 3, which is
+       dual-registered so ``AutoModelForCausalLM`` loads the full VLM).
 
     Args:
         config: An already-loaded HuggingFace model config object.
@@ -30,9 +34,19 @@ def is_vlm_with_causal_lm(config) -> bool:
     Returns:
         True if the model is a VLM wrapping a CausalLM text backbone.
     """
-    if config.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING:
-        return False
     text_config = getattr(config, "text_config", None)
+
+    if config.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING:
+        # Check what class AutoModelForCausalLM would actually load.
+        # Some models (e.g. Gemma 3) are dual-registered and resolve to
+        # a ForConditionalGeneration VLM, which still needs extraction.
+        resolved_cls = MODEL_FOR_CAUSAL_LM_MAPPING[config.__class__]
+        if "ForConditionalGeneration" not in resolved_cls.__name__:
+            return False
+        if text_config is None:
+            return False
+        return text_config.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING
+
     return text_config is not None and text_config.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING
 
 

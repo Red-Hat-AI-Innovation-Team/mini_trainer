@@ -152,7 +152,15 @@ def get_model_class_from_config(model_path):
 
     config_class = config.__class__
     if config_class in mapping:
-        return mapping[config_class]
+        resolved_cls = mapping[config_class]
+        # Some models (e.g. Gemma 3) are dual-registered: the top-level config
+        # maps to a ForConditionalGeneration VLM, not a text-only CausalLM.
+        # In that case, prefer the text_config's CausalLM class instead.
+        if "ForConditionalGeneration" in resolved_cls.__name__:
+            text_config = getattr(config, "text_config", None)
+            if text_config is not None and text_config.__class__ in mapping:
+                return mapping[text_config.__class__]
+        return resolved_cls
 
     # Fallback: for VLM models that wrap a CausalLM text backbone
     # (e.g. Mistral3Config wrapping Ministral3Config), check text_config
