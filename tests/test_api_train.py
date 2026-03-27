@@ -412,8 +412,8 @@ class TestRunTraining:
             assert tmpdir in log_file
             assert "training_log_node1.log" in log_file
 
-            # Verify command structure
-            assert command[0] == "torchrun"
+            # Verify command structure - command[0] may be a full path from shutil.which()
+            assert Path(command[0]).name == "torchrun"
             assert "--nnodes=2" in command
             assert "--node-rank=1" in command
             assert "--nproc-per-node=4" in command

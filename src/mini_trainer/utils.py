@@ -146,7 +146,8 @@ def get_model_class_from_config(model_path):
     regardless of VLM status, falling back to text_config when needed.
     """
     # get the model class from config
-    # TODO: make the `trust_remote_code` setting configurable somehow
+    # trust_remote_code is always True here because get_model_class_from_config
+    # is only called from setup_model which already gates on the user-provided flag
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     mapping = MODEL_FOR_CAUSAL_LM_MAPPING
 

@@ -656,7 +656,9 @@ def align_model_and_tokenizer(model, tokenizer):
     return model
 
 
-def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_path: str) -> torch.dtype:
+def get_model_save_dtype(
+    save_dtype: str | torch.dtype | None, model_name_or_path: str, trust_remote_code: bool = False
+) -> torch.dtype:
     """
     Given an HF model reference and an optional user-provided save_dtype, returns the PyTorch data type that it should
     be saved in.
@@ -688,9 +690,7 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
     # FSDP2 requires us to load the model in FP32 to begin with for the
     # correct mixed-precision settings. So to circumvent this, we load the
     # original model's config separately
-    original_config = AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=True
-    )
+    original_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
     original_dtype = getattr(original_config, "torch_dtype", None)
 
     # HF models return a torch.dtype from this field, but docs mark it as an optional string
@@ -853,7 +853,8 @@ def setup_sft_model_distributed(
     buffer_dict = None
 
     # Check if this is a VLM wrapping a CausalLM text backbone, or a direct VLM
-    _model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    _trust_remote = base_model_args.get("trust_remote_code", False)
+    _model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=_trust_remote)
     is_vlm = is_vlm_with_causal_lm(_model_config)
     is_direct_vlm = is_vlm_for_direct_loading(_model_config)
 
@@ -925,15 +926,16 @@ def setup_model(
     osft_rank_ratio: float | None = None,
     osft_target_patterns: list[str] | None = None,
     use_liger_kernels: bool = False,
+    trust_remote_code: bool = False,
 ) -> torch.nn.Module | OSFTModel:
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
         "torch_dtype": train_dtype,  # Ensure models are loaded in the training dtype
-        "trust_remote_code": True,
+        "trust_remote_code": trust_remote_code,
     }
 
     # Get model config to check for GPT-OSS and set appropriate configurations
-    model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
     is_gpt_oss = is_gpt_oss_model(model_config)
 
     # Pre-populate the transformers Hub kernel cache with locally installed
@@ -1019,9 +1021,7 @@ def setup_model(
         }
         log_rank_0(f"Model has timm vision tower — using eager attention for vision, {attn_impl} for text model.")
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path, trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
 
     # patch both loss functions, since models will use the regular HF
     # cross-entropy functions when in eval mode
@@ -1156,7 +1156,7 @@ def setup_model(
     model = load_osft_model() if osft else load_standard_model()
 
     # here we handle configuring the save_dtype
-    model.config.torch_dtype = get_model_save_dtype(save_dtype, model_name_or_path)
+    model.config.torch_dtype = get_model_save_dtype(save_dtype, model_name_or_path, trust_remote_code)
     if not model.config.torch_dtype:
         raise ValueError("error: model does not have a `torch_dtype` setting, cannot save model in this dtype")
 

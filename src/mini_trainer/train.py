@@ -102,6 +102,7 @@ def save_model(
     output_dir: str,
     model_name_or_path: str,
     suffix: str | None = None,
+    trust_remote_code: bool = False,
 ):
     """
     Save the given FSDP Model as a checkpoint in HF Format.
@@ -112,6 +113,7 @@ def save_model(
         output_dir (str): The directory to save the model.
         model_name_or_path (str): The model name or path.
         suffix (str | None): Optional suffix to add to the checkpoint directory name.
+        trust_remote_code (bool): Whether to trust remote code when loading tokenizer.
     """
     from huggingface_hub import split_torch_state_dict_into_shards
     from safetensors.torch import save_file
@@ -243,9 +245,7 @@ def save_model(
             # Standard config save for non-GPT-OSS models
             inner.config.to_json_file(os.path.join(save_directory, "config.json"))
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, trust_remote_code=True
-        )
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
         tokenizer.save_pretrained(save_directory)
 
     if get_node_rank() != 0:
@@ -654,6 +654,7 @@ def train(
     use_mlflow: bool = False,
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
+    trust_remote_code: bool = False,
 ):
     """
     Runs the model training loop.
@@ -684,6 +685,7 @@ def train(
         val_loss_improvement_threshold (float, optional): Minimum validation loss improvement required to trigger a save. Defaults to 0.0 (any improvement).
         val_data_loader (torch.utils.data.DataLoader | None, optional): Validation data loader. If provided, validation loss will be computed. Defaults to None.
         validation_frequency (int | None, optional): Frequency of validation evaluation in steps. Required when val_data_loader is provided. Defaults to None.
+        trust_remote_code (bool, optional): Whether to trust remote code when loading tokenizer for checkpoint saving. Defaults to False.
 
     Note:
         The training_mode can be provided as either a TrainingMode enum value or a string:
@@ -849,7 +851,13 @@ def train(
             if checkpointer.should_save_checkpoint(
                 save_type="min_samples", accumulated_samples=total_samples_accumulated
             ):
-                save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+                save_model(
+                    model,
+                    total_samples_accumulated,
+                    output_dir,
+                    model_name_or_path,
+                    trust_remote_code=trust_remote_code,
+                )
                 checkpointer.record_save("min_samples", total_samples_accumulated)
 
             # Check for best validation loss saving after validation runs
@@ -864,6 +872,7 @@ def train(
                     output_dir,
                     model_name_or_path,
                     suffix="best_val_loss",
+                    trust_remote_code=trust_remote_code,
                 )
                 checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
 
@@ -891,7 +900,13 @@ def train(
             accumulated_samples=total_samples_accumulated,
             end_of_epoch=True,
         ):
-            save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+            save_model(
+                model,
+                total_samples_accumulated,
+                output_dir,
+                model_name_or_path,
+                trust_remote_code=trust_remote_code,
+            )
             checkpointer.record_save("epoch", total_samples_accumulated)
 
     torch.distributed.barrier()
@@ -901,7 +916,13 @@ def train(
         accumulated_samples=total_samples_accumulated,
         end_of_training=True,
     ):
-        save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+        save_model(
+            model,
+            total_samples_accumulated,
+            output_dir,
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
         checkpointer.record_save("final", total_samples_accumulated)
 
 
@@ -1057,6 +1078,17 @@ def main(
         float,
         Option(help="Minimum validation loss improvement required to trigger a save"),
     ] = 0.0,
+    # security / custom model support
+    trust_remote_code: Annotated[
+        bool,
+        Option(
+            help=(
+                "Whether to allow loading models, tokenizers, and configs that use custom code "
+                "hosted on the Hugging Face Hub. Required for models like Nemotron, Ministral, "
+                "and Qwen3.5. Only enable this for repositories you trust."
+            )
+        ),
+    ] = False,
     # pretraining parameters
     block_size: Annotated[
         int | None,
@@ -1143,6 +1175,7 @@ def main(
             "osft_upcast_dtype": osft_upcast_dtype,
             "osft_output_dtype": osft_output_dtype,
             "osft_memory_efficient_init": osft_memory_efficient_init,
+            "trust_remote_code": trust_remote_code,
             "output_dir": output_dir,
             "min_samples_per_checkpoint": min_samples_per_checkpoint,
             "save_dtype": save_dtype,
@@ -1226,6 +1259,7 @@ def main(
         osft_target_patterns=osft_target_patterns,
         osft_upcast_dtype=osft_upcast_dtype_torch,
         osft_output_dtype=osft_output_dtype_torch,
+        trust_remote_code=trust_remote_code,
     )
 
     # Create PretrainingConfig if block_size is provided
@@ -1299,6 +1333,7 @@ def main(
         use_mlflow=use_mlflow,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
+        trust_remote_code=trust_remote_code,
     )
 
     # once done, tear down distributed environment
