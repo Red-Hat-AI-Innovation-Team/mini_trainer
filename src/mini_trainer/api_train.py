@@ -103,11 +103,13 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     # Build torchrun command
     train_script = Path(__file__).parent / "train.py"
 
-    # Find torchrun executable - try PATH first, then sys.executable's bin dir
+    # Find torchrun executable
     torchrun_path = shutil.which("torchrun")
     if not torchrun_path:
-        # Fall back to same directory as current Python executable
-        torchrun_path = str(Path(sys.executable).parent / "torchrun")
+        raise RuntimeError(
+            "torchrun executable not found in PATH. "
+            "Ensure PyTorch is installed correctly."
+        )
 
     command = [
         torchrun_path,
