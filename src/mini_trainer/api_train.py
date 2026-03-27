@@ -3,7 +3,9 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from mini_trainer.training_types import TorchrunArgs, TrainingArgs
@@ -101,8 +103,14 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     # Build torchrun command
     train_script = Path(__file__).parent / "train.py"
 
+    # Find torchrun executable - try PATH first, then sys.executable's bin dir
+    torchrun_path = shutil.which("torchrun")
+    if not torchrun_path:
+        # Fall back to same directory as current Python executable
+        torchrun_path = str(Path(sys.executable).parent / "torchrun")
+
     command = [
-        "torchrun",
+        torchrun_path,
         f"--nnodes={torch_args.nnodes}",
         f"--node-rank={torch_args.node_rank}",
         f"--nproc-per-node={torch_args.nproc_per_node}",

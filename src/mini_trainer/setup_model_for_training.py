@@ -688,7 +688,9 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
     # FSDP2 requires us to load the model in FP32 to begin with for the
     # correct mixed-precision settings. So to circumvent this, we load the
     # original model's config separately
-    original_config = AutoConfig.from_pretrained(model_name_or_path)
+    original_config = AutoConfig.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
     original_dtype = getattr(original_config, "torch_dtype", None)
 
     # HF models return a torch.dtype from this field, but docs mark it as an optional string
@@ -927,10 +929,11 @@ def setup_model(
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
         "torch_dtype": train_dtype,  # Ensure models are loaded in the training dtype
+        "trust_remote_code": True,
     }
 
     # Get model config to check for GPT-OSS and set appropriate configurations
-    model_config = AutoConfig.from_pretrained(model_name_or_path)
+    model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     is_gpt_oss = is_gpt_oss_model(model_config)
 
     # Pre-populate the transformers Hub kernel cache with locally installed
@@ -1016,7 +1019,9 @@ def setup_model(
         }
         log_rank_0(f"Model has timm vision tower — using eager attention for vision, {attn_impl} for text model.")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
 
     # patch both loss functions, since models will use the regular HF
     # cross-entropy functions when in eval mode

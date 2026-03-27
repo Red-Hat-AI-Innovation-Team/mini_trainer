@@ -243,7 +243,9 @@ def save_model(
             # Standard config save for non-GPT-OSS models
             inner.config.to_json_file(os.path.join(save_directory, "config.json"))
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path, trust_remote_code=True
+        )
         tokenizer.save_pretrained(save_directory)
 
     if get_node_rank() != 0:
