@@ -942,7 +942,7 @@ def setup_model(
     # mamba_ssm and causal_conv1d packages. The Hub kernel versions may be
     # compiled against a different PyTorch/CUDA build, causing runtime errors.
     # Using local packages ensures ABI compatibility.
-    if getattr(model_config, "model_type", None) == "granitemoehybrid":
+    if getattr(model_config, "model_type", None) in ("granitemoehybrid", "nemotron_h"):
         try:
             import causal_conv1d
             import mamba_ssm
