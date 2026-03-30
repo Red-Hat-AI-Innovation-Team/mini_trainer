@@ -183,12 +183,21 @@ def save_model(
     # Check if this is a GPT-OSS model that needs format conversion
     is_gpt_oss = is_gpt_oss_model(inner.config)
 
+    # Check if this model was dequantized from FP8 and needs re-quantization.
+    # Look on config since it survives model wrapping (OSFT, FSDP).
+    fp8_scales = getattr(inner.config, "_fp8_scales", None)
+
     if global_rank == 0:
         # Model format conversion (GPT-OSS vs standard)
         if is_gpt_oss:
             log_rank_0("🔧 Converting GPT-OSS parameters to quantized format for compatibility")
             # Convert state dict on GPU, then move to CPU
             state_dict = convert_dequantized_to_quantized_format_correct(state_dict)
+        elif fp8_scales:
+            from mini_trainer.vlm_utils import requantize_fp8_state_dict
+
+            log_rank_0("🔧 Re-quantizing FP8 parameters for checkpoint compatibility")
+            state_dict = requantize_fp8_state_dict(state_dict, fp8_scales)
         else:
             # Once we have all of our parameters, we need to ensure they're stored in BF16
             # so checkpoints aren't terrible heavy. We have to do this _after_ `prepare_state_dict_for_save`
@@ -239,6 +248,22 @@ def save_model(
                     "quant_method": "mxfp4",
                 }
             # Save the modified config
+            with open(os.path.join(save_directory, "config.json"), "w") as f:
+                json.dump(config_dict, f, indent=2)
+        elif fp8_scales:
+            # Restore original FP8 quantization config for the saved checkpoint.
+            # We must also strip our internal _fp8_* keys from the config dict
+            # since they contain tensors that are not JSON-serializable.
+            fp8_quant_config = getattr(inner.config, "_fp8_quantization_config", None)
+            config_dict = inner.config.to_dict()
+            config_dict.pop("_fp8_scales", None)
+            config_dict.pop("_fp8_quantization_config", None)
+            if fp8_quant_config is not None:
+                config_dict["quantization_config"] = (
+                    fp8_quant_config.to_dict()
+                    if hasattr(fp8_quant_config, "to_dict")
+                    else fp8_quant_config
+                )
             with open(os.path.join(save_directory, "config.json"), "w") as f:
                 json.dump(config_dict, f, indent=2)
         else:

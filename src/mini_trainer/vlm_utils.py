@@ -151,6 +151,134 @@ def _find_text_backbone(vlm_model: nn.Module) -> nn.Module:
     )
 
 
+def _dequantize_fp8_model(model: nn.Module) -> None:
+    """Dequantize FP8 weights in-place for FSDP compatibility.
+
+    Some models (e.g. Ministral) ship with FP8 quantized weights that include
+    scalar parameters like ``weight_scale_inv`` and ``activation_scale``.
+    FSDP rejects scalar parameters, so we dequantize the weights back to
+    bfloat16 and remove all FP8 scalar parameters before distributed wrapping.
+
+    The original FP8 scales and quantization config are preserved on the model
+    (as ``_fp8_scales`` and ``_fp8_quantization_config``) so that
+    :func:`requantize_fp8_state_dict` can restore them at checkpoint save time.
+
+    The dequantization formula is:
+        real_weight = fp8_weight.to(bfloat16) * weight_scale_inv
+    """
+    # FP8 scalar parameter names to remove after dequantization.
+    # weight_scale_inv: inverse scale for weight quantization
+    # activation_scale: scale for activation quantization (inference only)
+    _FP8_SCALAR_ATTRS = ("weight_scale_inv", "activation_scale")
+
+    # Store original scales keyed by module path for requantization at save time.
+    fp8_scales: dict[str, dict[str, torch.Tensor]] = {}
+
+    dequantized_count = 0
+    for mod_name, module in model.named_modules():
+        has_fp8 = any(hasattr(module, attr) for attr in _FP8_SCALAR_ATTRS)
+        if not has_fp8:
+            continue
+
+        # Capture original scales before removing them
+        saved = {}
+        for attr in _FP8_SCALAR_ATTRS:
+            if hasattr(module, attr):
+                saved[attr] = getattr(module, attr).detach().clone().cpu()
+        if saved:
+            fp8_scales[mod_name] = saved
+
+        # Dequantize weight if scale is present
+        if hasattr(module, "weight_scale_inv") and hasattr(module, "weight"):
+            scale_inv = module.weight_scale_inv
+            weight = module.weight
+            dtype = torch.bfloat16
+            dequantized = weight.to(dtype) * scale_inv.to(dtype)
+            module.weight = nn.Parameter(
+                dequantized, requires_grad=weight.requires_grad
+            )
+
+        # Remove all FP8 scalar parameters/buffers
+        for attr in _FP8_SCALAR_ATTRS:
+            if not hasattr(module, attr):
+                continue
+            if attr in dict(module.named_parameters(recurse=False)):
+                delattr(module, attr)
+            elif attr in dict(module.named_buffers(recurse=False)):
+                setattr(module, attr, None)
+
+        dequantized_count += 1
+
+    if dequantized_count > 0:
+        log_rank_0(
+            f"   Dequantized {dequantized_count} FP8 layers to bfloat16 for FSDP compatibility"
+        )
+        # Preserve scales and quantization config for checkpoint re-quantization.
+        # Store on both the model and its config so the metadata survives
+        # model wrapping (OSFT, FSDP) and distributed broadcast.
+        model._fp8_scales = fp8_scales
+        cfg = getattr(model, "config", None)
+        if cfg is not None:
+            cfg._fp8_scales = fp8_scales
+            if hasattr(cfg, "quantization_config"):
+                model._fp8_quantization_config = cfg.quantization_config
+                cfg._fp8_quantization_config = cfg.quantization_config
+                cfg.quantization_config = None
+        # Clear quantization metadata so downstream code doesn't treat
+        # the model as quantized during training
+        if hasattr(model, "hf_quantizer"):
+            model.hf_quantizer = None
+        if hasattr(model, "is_loaded_in_8bit"):
+            model.is_loaded_in_8bit = False
+
+
+def requantize_fp8_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    fp8_scales: dict[str, dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    """Re-quantize a dequantized state dict back to FP8 for checkpoint saving.
+
+    This is the inverse of :func:`_dequantize_fp8_model`.  It converts
+    bfloat16 weights back to ``float8_e4m3fn`` and restores the original
+    ``weight_scale_inv`` and ``activation_scale`` entries so the saved
+    checkpoint matches the original FP8 format.
+
+    Args:
+        state_dict: The model state dict with bfloat16 weights.
+        fp8_scales: The ``_fp8_scales`` dict stored by
+            :func:`_dequantize_fp8_model`, mapping module paths to their
+            original scale tensors.
+
+    Returns:
+        A new state dict with FP8 weights and restored scale entries.
+    """
+    out = {}
+    for key, tensor in state_dict.items():
+        out[key] = tensor
+
+    for mod_path, scales in fp8_scales.items():
+        weight_key = f"{mod_path}.weight"
+        if weight_key not in out:
+            continue
+
+        weight = out[weight_key]
+
+        # Re-quantize: fp8_weight = real_weight / weight_scale_inv
+        if "weight_scale_inv" in scales:
+            scale_inv = scales["weight_scale_inv"]
+            requantized = (weight.to(torch.float32) / scale_inv.to(torch.float32)).to(
+                torch.float8_e4m3fn
+            )
+            out[weight_key] = requantized
+            out[f"{mod_path}.weight_scale_inv"] = scale_inv
+
+        # Restore activation_scale as-is
+        if "activation_scale" in scales:
+            out[f"{mod_path}.activation_scale"] = scales["activation_scale"]
+
+    return out
+
+
 def extract_causal_lm_from_vlm(model_path: str, load_kwargs: dict) -> nn.Module:
     """Load a VLM and extract the CausalLM text backbone.
 
@@ -185,6 +313,13 @@ def extract_causal_lm_from_vlm(model_path: str, load_kwargs: dict) -> nn.Module:
     # Resolve text_config and create standalone CausalLM
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     text_config = config.text_config
+
+    # Propagate quantization_config from the VLM config to text_config
+    # so FP8 dequantization can preserve and restore it at checkpoint time.
+    vlm_quant_cfg = getattr(config, "quantization_config", None)
+    if vlm_quant_cfg is not None and not hasattr(text_config, "quantization_config"):
+        text_config.quantization_config = vlm_quant_cfg
+
     causal_lm_class = MODEL_FOR_CAUSAL_LM_MAPPING[text_config.__class__]
 
     log_rank_0(f"   Extracting {causal_lm_class.__name__} from {type(vlm).__name__}")
@@ -202,6 +337,10 @@ def extract_causal_lm_from_vlm(model_path: str, load_kwargs: dict) -> nn.Module:
     del vlm
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    # Dequantize FP8 weights if present — FSDP rejects scalar parameters
+    # like weight_scale_inv that come from FP8 quantized models.
+    _dequantize_fp8_model(text_model)
 
     log_rank_0(f"   ✅ Extracted {causal_lm_class.__name__} successfully")
     return text_model

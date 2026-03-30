@@ -873,6 +873,12 @@ def setup_sft_model_distributed(
                     cpu_model = ModelClass.from_pretrained(**base_model_args)
                 cpu_model = align_model_and_tokenizer(cpu_model, tokenizer)
                 config = cpu_model.config
+                # Preserve FP8 dequantization metadata on the config so it
+                # survives the broadcast to other ranks and model recreation.
+                if hasattr(cpu_model, "_fp8_scales"):
+                    config._fp8_scales = cpu_model._fp8_scales
+                if hasattr(cpu_model, "_fp8_quantization_config"):
+                    config._fp8_quantization_config = cpu_model._fp8_quantization_config
                 state_dict = cpu_model.state_dict()
                 buffer_dict = dict(cpu_model.named_buffers())  # Extract all buffers
         finally:
@@ -904,6 +910,13 @@ def setup_sft_model_distributed(
 
     # Align model with tokenizer
     model = align_model_and_tokenizer(model, tokenizer)
+
+    # Transfer FP8 metadata from config to the new model so checkpoint
+    # saving can re-quantize weights back to FP8.
+    if hasattr(config, "_fp8_scales"):
+        model._fp8_scales = config._fp8_scales
+    if hasattr(config, "_fp8_quantization_config"):
+        model._fp8_quantization_config = config._fp8_quantization_config
 
     # Store state dict and buffers for post-FSDP loading
     model._fsdp2_pending_state_dict = state_dict if dist.get_rank() == 0 else None
