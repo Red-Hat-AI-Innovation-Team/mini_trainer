@@ -194,9 +194,7 @@ def _dequantize_fp8_model(model: nn.Module) -> None:
             weight = module.weight
             dtype = torch.bfloat16
             dequantized = weight.to(dtype) * scale_inv.to(dtype)
-            module.weight = nn.Parameter(
-                dequantized, requires_grad=weight.requires_grad
-            )
+            module.weight = nn.Parameter(dequantized, requires_grad=weight.requires_grad)
 
         # Remove all FP8 scalar parameters/buffers
         for attr in _FP8_SCALAR_ATTRS:
@@ -210,9 +208,7 @@ def _dequantize_fp8_model(model: nn.Module) -> None:
         dequantized_count += 1
 
     if dequantized_count > 0:
-        log_rank_0(
-            f"   Dequantized {dequantized_count} FP8 layers to bfloat16 for FSDP compatibility"
-        )
+        log_rank_0(f"   Dequantized {dequantized_count} FP8 layers to bfloat16 for FSDP compatibility")
         # Preserve scales and quantization config for checkpoint re-quantization.
         # Store on both the model and its config so the metadata survives
         # model wrapping (OSFT, FSDP) and distributed broadcast.
@@ -266,9 +262,7 @@ def requantize_fp8_state_dict(
         # Re-quantize: fp8_weight = real_weight / weight_scale_inv
         if "weight_scale_inv" in scales:
             scale_inv = scales["weight_scale_inv"]
-            requantized = (weight.to(torch.float32) / scale_inv.to(torch.float32)).to(
-                torch.float8_e4m3fn
-            )
+            requantized = (weight.to(torch.float32) / scale_inv.to(torch.float32)).to(torch.float8_e4m3fn)
             out[weight_key] = requantized
             out[f"{mod_path}.weight_scale_inv"] = scale_inv
 

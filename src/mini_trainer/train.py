@@ -185,7 +185,9 @@ def save_model(
 
     # Check if this model was dequantized from FP8 and needs re-quantization.
     # Look on config since it survives model wrapping (OSFT, FSDP).
-    fp8_scales = getattr(inner.config, "_fp8_scales", None)
+    # Use isinstance check to avoid false positives from MagicMock in tests.
+    _fp8_attr = getattr(inner.config, "_fp8_scales", None)
+    fp8_scales = _fp8_attr if isinstance(_fp8_attr, dict) else None
 
     if global_rank == 0:
         # Model format conversion (GPT-OSS vs standard)
@@ -260,9 +262,7 @@ def save_model(
             config_dict.pop("_fp8_quantization_config", None)
             if fp8_quant_config is not None:
                 config_dict["quantization_config"] = (
-                    fp8_quant_config.to_dict()
-                    if hasattr(fp8_quant_config, "to_dict")
-                    else fp8_quant_config
+                    fp8_quant_config.to_dict() if hasattr(fp8_quant_config, "to_dict") else fp8_quant_config
                 )
             with open(os.path.join(save_directory, "config.json"), "w") as f:
                 json.dump(config_dict, f, indent=2)
