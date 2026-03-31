@@ -205,6 +205,9 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if train_args.save_dtype:
         command.append(f"--save-dtype={train_args.save_dtype}")
 
+    if train_args.trust_remote_code:
+        command.append("--trust-remote-code")
+
     logger.info("Running training command as subprocess: %s", " ".join(command))
 
     # Run the training process

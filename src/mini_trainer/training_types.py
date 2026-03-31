@@ -214,6 +214,18 @@ class TrainingArgs:
         },
     )
 
+    # Security / custom model support
+    trust_remote_code: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to allow loading models, tokenizers, and configs that use custom code hosted "
+                "on the Hugging Face Hub. Required for models like Nemotron, Ministral, and Qwen3.5. "
+                "Only enable this for repositories you trust."
+            )
+        },
+    )
+
     # from train.py:
     save_best_val_loss: bool = field(
         default=False,

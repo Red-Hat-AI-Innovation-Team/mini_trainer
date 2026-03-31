@@ -102,6 +102,7 @@ def save_model(
     output_dir: str,
     model_name_or_path: str,
     suffix: str | None = None,
+    trust_remote_code: bool = False,
 ):
     """
     Save the given FSDP Model as a checkpoint in HF Format.
@@ -112,6 +113,7 @@ def save_model(
         output_dir (str): The directory to save the model.
         model_name_or_path (str): The model name or path.
         suffix (str | None): Optional suffix to add to the checkpoint directory name.
+        trust_remote_code (bool): Whether to trust remote code when loading tokenizer.
     """
     from huggingface_hub import split_torch_state_dict_into_shards
     from safetensors.torch import save_file
@@ -181,12 +183,23 @@ def save_model(
     # Check if this is a GPT-OSS model that needs format conversion
     is_gpt_oss = is_gpt_oss_model(inner.config)
 
+    # Check if this model was dequantized from FP8 and needs re-quantization.
+    # Look on config since it survives model wrapping (OSFT, FSDP).
+    # Use isinstance check to avoid false positives from MagicMock in tests.
+    _fp8_attr = getattr(inner.config, "_fp8_scales", None)
+    fp8_scales = _fp8_attr if isinstance(_fp8_attr, dict) else None
+
     if global_rank == 0:
         # Model format conversion (GPT-OSS vs standard)
         if is_gpt_oss:
             log_rank_0("🔧 Converting GPT-OSS parameters to quantized format for compatibility")
             # Convert state dict on GPU, then move to CPU
             state_dict = convert_dequantized_to_quantized_format_correct(state_dict)
+        elif fp8_scales:
+            from mini_trainer.vlm_utils import requantize_fp8_state_dict
+
+            log_rank_0("🔧 Re-quantizing FP8 parameters for checkpoint compatibility")
+            state_dict = requantize_fp8_state_dict(state_dict, fp8_scales)
         else:
             # Once we have all of our parameters, we need to ensure they're stored in BF16
             # so checkpoints aren't terrible heavy. We have to do this _after_ `prepare_state_dict_for_save`
@@ -239,11 +252,25 @@ def save_model(
             # Save the modified config
             with open(os.path.join(save_directory, "config.json"), "w") as f:
                 json.dump(config_dict, f, indent=2)
+        elif fp8_scales:
+            # Restore original FP8 quantization config for the saved checkpoint.
+            # We must also strip our internal _fp8_* keys from the config dict
+            # since they contain tensors that are not JSON-serializable.
+            fp8_quant_config = getattr(inner.config, "_fp8_quantization_config", None)
+            config_dict = inner.config.to_dict()
+            config_dict.pop("_fp8_scales", None)
+            config_dict.pop("_fp8_quantization_config", None)
+            if fp8_quant_config is not None:
+                config_dict["quantization_config"] = (
+                    fp8_quant_config.to_dict() if hasattr(fp8_quant_config, "to_dict") else fp8_quant_config
+                )
+            with open(os.path.join(save_directory, "config.json"), "w") as f:
+                json.dump(config_dict, f, indent=2)
         else:
             # Standard config save for non-GPT-OSS models
             inner.config.to_json_file(os.path.join(save_directory, "config.json"))
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
         tokenizer.save_pretrained(save_directory)
 
     if get_node_rank() != 0:
@@ -652,6 +679,7 @@ def train(
     use_mlflow: bool = False,
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
+    trust_remote_code: bool = False,
 ):
     """
     Runs the model training loop.
@@ -682,6 +710,7 @@ def train(
         val_loss_improvement_threshold (float, optional): Minimum validation loss improvement required to trigger a save. Defaults to 0.0 (any improvement).
         val_data_loader (torch.utils.data.DataLoader | None, optional): Validation data loader. If provided, validation loss will be computed. Defaults to None.
         validation_frequency (int | None, optional): Frequency of validation evaluation in steps. Required when val_data_loader is provided. Defaults to None.
+        trust_remote_code (bool, optional): Whether to trust remote code when loading tokenizer for checkpoint saving. Defaults to False.
 
     Note:
         The training_mode can be provided as either a TrainingMode enum value or a string:
@@ -847,7 +876,13 @@ def train(
             if checkpointer.should_save_checkpoint(
                 save_type="min_samples", accumulated_samples=total_samples_accumulated
             ):
-                save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+                save_model(
+                    model,
+                    total_samples_accumulated,
+                    output_dir,
+                    model_name_or_path,
+                    trust_remote_code=trust_remote_code,
+                )
                 checkpointer.record_save("min_samples", total_samples_accumulated)
 
             # Check for best validation loss saving after validation runs
@@ -862,6 +897,7 @@ def train(
                     output_dir,
                     model_name_or_path,
                     suffix="best_val_loss",
+                    trust_remote_code=trust_remote_code,
                 )
                 checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
 
@@ -889,7 +925,13 @@ def train(
             accumulated_samples=total_samples_accumulated,
             end_of_epoch=True,
         ):
-            save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+            save_model(
+                model,
+                total_samples_accumulated,
+                output_dir,
+                model_name_or_path,
+                trust_remote_code=trust_remote_code,
+            )
             checkpointer.record_save("epoch", total_samples_accumulated)
 
     torch.distributed.barrier()
@@ -899,7 +941,13 @@ def train(
         accumulated_samples=total_samples_accumulated,
         end_of_training=True,
     ):
-        save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+        save_model(
+            model,
+            total_samples_accumulated,
+            output_dir,
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
         checkpointer.record_save("final", total_samples_accumulated)
 
 
@@ -1055,6 +1103,17 @@ def main(
         float,
         Option(help="Minimum validation loss improvement required to trigger a save"),
     ] = 0.0,
+    # security / custom model support
+    trust_remote_code: Annotated[
+        bool,
+        Option(
+            help=(
+                "Whether to allow loading models, tokenizers, and configs that use custom code "
+                "hosted on the Hugging Face Hub. Required for models like Nemotron, Ministral, "
+                "and Qwen3.5. Only enable this for repositories you trust."
+            )
+        ),
+    ] = False,
     # pretraining parameters
     block_size: Annotated[
         int | None,
@@ -1141,6 +1200,7 @@ def main(
             "osft_upcast_dtype": osft_upcast_dtype,
             "osft_output_dtype": osft_output_dtype,
             "osft_memory_efficient_init": osft_memory_efficient_init,
+            "trust_remote_code": trust_remote_code,
             "output_dir": output_dir,
             "min_samples_per_checkpoint": min_samples_per_checkpoint,
             "save_dtype": save_dtype,
@@ -1224,6 +1284,7 @@ def main(
         osft_target_patterns=osft_target_patterns,
         osft_upcast_dtype=osft_upcast_dtype_torch,
         osft_output_dtype=osft_output_dtype_torch,
+        trust_remote_code=trust_remote_code,
     )
 
     # Create PretrainingConfig if block_size is provided
@@ -1297,6 +1358,7 @@ def main(
         use_mlflow=use_mlflow,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
+        trust_remote_code=trust_remote_code,
     )
 
     # once done, tear down distributed environment
