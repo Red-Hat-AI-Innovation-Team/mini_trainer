@@ -1,4 +1,5 @@
 import gc
+import math
 import os
 import types
 import typing as t
@@ -30,7 +31,7 @@ OSFT_CACHE_CLEAR_INTERVAL = int(
 #
 # V projection uses the factored form: dV -= (dV @ V_high^T) @ V_high.
 # Under FSDP2, V_high is dim-0 sharded, so the factored form requires an
-# all-gather of V_high (k_high × M).  Caching stores the all-gathered result.
+# all-gather of V_high (k_high x M).  Caching stores the all-gathered result.
 #
 # Default OFF because the cache is REPLICATED on every FSDP2 rank (not
 # sharded), adding ~5.1 GB per rank for Llama-8B (all 224 targets in bf16).
@@ -613,12 +614,49 @@ def project_gradient_to_orthogonal_space(
             V_high_full = cached
         else:
             if dist.is_initialized() and dist.get_world_size() > 1:
-                world_size = dist.get_world_size()
-                V_high_full = torch.empty(
-                    local_V_high.shape[0] * world_size, local_V_high.shape[1],
-                    dtype=local_V_high.dtype, device=local_V_high.device,
-                )
-                dist.all_gather_into_tensor(V_high_full, local_V_high)
+                full_k_high = svd_dict["rank_high"]
+                if local_V_high.shape[0] < full_k_high:
+                    # FSDP2-sharded: all-gather V_high from all ranks.
+                    world_size = dist.get_world_size()
+                    remainder = full_k_high % world_size
+                    if remainder == 0:
+                        # Even split — direct gather, no padding needed.
+                        V_high_full = torch.empty(
+                            full_k_high,
+                            local_V_high.shape[1],
+                            dtype=local_V_high.dtype,
+                            device=local_V_high.device,
+                        )
+                        dist.all_gather_into_tensor(V_high_full, local_V_high)
+                    else:
+                        # Uneven split — DTensor Shard(0) uses torch.chunk
+                        # semantics: all shards have ceil(k/P) rows except
+                        # the last which gets the remainder.  Pad each shard
+                        # to ceil rows for all_gather_into_tensor, then
+                        # extract valid rows per rank.
+                        rows_per_rank = math.ceil(full_k_high / world_size)
+                        padded = torch.zeros(
+                            rows_per_rank,
+                            local_V_high.shape[1],
+                            dtype=local_V_high.dtype,
+                            device=local_V_high.device,
+                        )
+                        padded[: local_V_high.shape[0]].copy_(local_V_high)
+                        gathered = torch.empty(
+                            rows_per_rank * world_size,
+                            local_V_high.shape[1],
+                            dtype=local_V_high.dtype,
+                            device=local_V_high.device,
+                        )
+                        dist.all_gather_into_tensor(gathered, padded)
+                        parts = []
+                        for i in range(world_size):
+                            n = min(rows_per_rank, full_k_high - rows_per_rank * i)
+                            parts.append(gathered[i * rows_per_rank : i * rows_per_rank + n])
+                        V_high_full = torch.cat(parts)
+                else:
+                    # to_local() returned the full tensor (not FSDP-sharded)
+                    V_high_full = local_V_high
             else:
                 V_high_full = local_V_high
             if can_cache:
@@ -628,7 +666,7 @@ def project_gradient_to_orthogonal_space(
 
         # Two local matmuls — no (M, M) intermediate
         coeff = torch.mm(local_dV, V_high_full.transpose(0, 1))  # (k_low/P, k_high)
-        local_dV.addmm_(coeff, V_high_full, alpha=-1.0)          # (k_low/P, M)
+        local_dV.addmm_(coeff, V_high_full, alpha=-1.0)  # (k_low/P, M)
 
         if hasattr(dV, "_local_tensor"):
             dV._local_tensor.copy_(local_dV)
