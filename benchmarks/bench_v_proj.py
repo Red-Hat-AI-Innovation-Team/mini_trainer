@@ -19,7 +19,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def bench_target(name, k_high, k_low, M, P, dev, n_iters=100):
+def bench_target(name, k_high, k_low, M, P, rank, dev, n_iters=100):
     """Benchmark one OSFT target shape.  Returns dict of timings."""
     if k_high % P != 0 or k_low % P != 0:
         raise ValueError(f"k_high={k_high} and k_low={k_low} must both be divisible by P={P}")
@@ -107,13 +107,7 @@ def bench_target(name, k_high, k_low, M, P, dev, n_iters=100):
     }
 
 
-# Global for shard indexing
-rank = 0
-
-
-def run(rank_, world_size):
-    global rank
-    rank = rank_
+def run(rank, world_size):
     os.environ.update(MASTER_ADDR="localhost", MASTER_PORT="29500", RANK=str(rank), WORLD_SIZE=str(world_size))
     dist.init_process_group("nccl")
     torch.cuda.set_device(rank)
@@ -129,7 +123,7 @@ def run(rank_, world_size):
 
     results = []
     for name, k_high, k_low, M in targets:
-        r = bench_target(name, k_high, k_low, M, world_size, dev)
+        r = bench_target(name, k_high, k_low, M, world_size, rank, dev)
         results.append(r)
 
     if rank == 0:

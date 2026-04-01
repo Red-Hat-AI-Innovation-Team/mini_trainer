@@ -630,10 +630,9 @@ def project_gradient_to_orthogonal_space(
                         dist.all_gather_into_tensor(V_high_full, local_V_high)
                     else:
                         # Uneven split — DTensor Shard(0) uses torch.chunk
-                        # semantics: all shards have ceil(k/P) rows except
-                        # the last which gets the remainder.  Pad each shard
-                        # to ceil rows for all_gather_into_tensor, then
-                        # extract valid rows per rank.
+                        # semantics: only the last shard is short, so padding
+                        # lands at the tail of the gathered buffer.  Pad to
+                        # ceil rows for all_gather, then slice off padding.
                         rows_per_rank = math.ceil(full_k_high / world_size)
                         padded = torch.zeros(
                             rows_per_rank,
@@ -649,11 +648,7 @@ def project_gradient_to_orthogonal_space(
                             device=local_V_high.device,
                         )
                         dist.all_gather_into_tensor(gathered, padded)
-                        parts = []
-                        for i in range(world_size):
-                            n = min(rows_per_rank, full_k_high - rows_per_rank * i)
-                            parts.append(gathered[i * rows_per_rank : i * rows_per_rank + n])
-                        V_high_full = torch.cat(parts)
+                        V_high_full = gathered[:full_k_high]
                 else:
                     # to_local() returned the full tensor (not FSDP-sharded)
                     V_high_full = local_V_high
