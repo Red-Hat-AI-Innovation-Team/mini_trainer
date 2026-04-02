@@ -18,6 +18,7 @@ from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.sampler import get_data_loader
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.training_types import PretrainingConfig, TrainingMode
+from mini_trainer.full_state_checkpoint import FullStateCheckpointer
 from mini_trainer.utils import (
     destroy_distributed_environment,
     get_node_rank,
@@ -680,6 +681,8 @@ def train(
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
     trust_remote_code: bool = False,
+    on_demand_checkpointing: bool = False,
+    resume_from_full_state_checkpoint: str | None = None,
 ):
     """
     Runs the model training loop.
@@ -755,9 +758,59 @@ def train(
         checkpoint_at_final=save_final_checkpoint,
     )
 
+    # Initialize on-demand full-state checkpointing if enabled
+    full_state_checkpointer = None
+    if on_demand_checkpointing:
+        full_state_checkpointer = FullStateCheckpointer(
+            checkpoint_dir=os.path.join(output_dir, "full_state_checkpoints"),
+            rank=dist.get_rank(),
+            world_size=world_size,
+        )
+        full_state_checkpointer.install_signal_handlers()
+        log_rank_0("On-demand full-state checkpointing enabled")
+
     device = next(model.parameters()).device
     epoch = 0
     last_validation_loss = None  # Track the most recent validation loss
+
+    # Restore training state from full-state checkpoint if resuming
+    if resume_from_full_state_checkpoint:
+        log_rank_0(f"Resuming from full-state checkpoint: {resume_from_full_state_checkpoint}")
+        meta = FullStateCheckpointer.load_metadata(resume_from_full_state_checkpoint)
+
+        # Restore training counters
+        step = meta["step"]
+        epoch = meta["epoch"]
+        total_samples_accumulated = meta["total_samples_accumulated"]
+        total_tokens_processed = meta["total_tokens_processed"]
+        last_validation_loss = meta.get("last_validation_loss")
+
+        # Restore checkpointer state
+        cs = meta["checkpointer_state"]
+        checkpointer.last_saved_samples = cs["last_saved_samples"]
+        checkpointer.last_frequency_saved_samples = cs["last_frequency_saved_samples"]
+        checkpointer.best_val_loss = cs["best_val_loss"]
+
+        # Restore LR scheduler
+        lr_scheduler.load_state_dict(meta["lr_scheduler_state"])
+
+        # Restore sampler epoch
+        data_loader.sampler.set_epoch(meta["sampler_epoch"])
+
+        # Restore per-rank RNG states
+        FullStateCheckpointer.load_rng_states(
+            resume_from_full_state_checkpoint, rank=dist.get_rank()
+        )
+
+        # Load optimizer state from DCP checkpoint
+        FullStateCheckpointer.load_distributed_state(
+            resume_from_full_state_checkpoint, model, optimizer
+        )
+
+        log_rank_0(f"Resumed at step={step}, epoch={epoch}, samples={total_samples_accumulated}")
+
+    # Track samples for batch-skipping when resuming mid-epoch
+    _resume_target_samples = total_samples_accumulated if resume_from_full_state_checkpoint else None
 
     # main training loop
     while not reached_stop_condition(
@@ -773,7 +826,17 @@ def train(
         data_loader.sampler.set_epoch(epoch)
         data_loader_it = iter(data_loader)
 
+        _skipped_samples = 0
         for batch in data_loader_it:
+            # Skip already-processed batches when resuming mid-epoch
+            if _resume_target_samples is not None:
+                _skipped_samples += sum(mb["num_samples"] for mb in batch)
+                if _skipped_samples < _resume_target_samples:
+                    continue
+                # Done skipping — clear the resume state
+                _resume_target_samples = None
+                log_rank_0(f"Skipped {_skipped_samples} samples to resume position")
+
             batch_start_time = time.time()
             batch_totals.reset_batch()
             torch.cuda.reset_peak_memory_stats()
@@ -871,6 +934,32 @@ def train(
                 metric_logger.log_sync(batch_metrics)
 
             dist.barrier()
+
+            # On-demand full-state checkpoint check
+            if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                log_rank_0("Signal received — saving full-state checkpoint and exiting")
+                full_state_checkpointer.save(
+                    model=model,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    training_state={
+                        "step": step,
+                        "epoch": epoch,
+                        "total_samples_accumulated": total_samples_accumulated,
+                        "total_tokens_processed": total_tokens_processed,
+                        "last_validation_loss": last_validation_loss,
+                    },
+                    checkpointer_state={
+                        "last_saved_samples": checkpointer.last_saved_samples,
+                        "last_frequency_saved_samples": checkpointer.last_frequency_saved_samples,
+                        "best_val_loss": checkpointer.best_val_loss,
+                    },
+                    data_loader=data_loader,
+                    device=device,
+                )
+                full_state_checkpointer.cleanup()
+                log_rank_0("Full-state checkpoint saved. Exiting.")
+                sys.exit(0)
 
             # sample-based saving, keep in the inner loop
             if checkpointer.should_save_checkpoint(
@@ -1114,6 +1203,15 @@ def main(
             )
         ),
     ] = False,
+    # On-demand full-state checkpointing
+    on_demand_checkpointing: Annotated[
+        bool,
+        Option(help="Enable signal-driven full-state checkpointing for training resumption"),
+    ] = False,
+    resume_from_full_state_checkpoint: Annotated[
+        str | None,
+        Option(help="Path to a full-state checkpoint directory to resume training from"),
+    ] = None,
     # pretraining parameters
     block_size: Annotated[
         int | None,
@@ -1335,6 +1433,7 @@ def main(
         beta2=beta2,
         eps=eps,
         weight_decay=weight_decay,
+        resume_from_checkpoint=resume_from_full_state_checkpoint,
     )
 
     train(
@@ -1359,6 +1458,8 @@ def main(
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
         trust_remote_code=trust_remote_code,
+        on_demand_checkpointing=on_demand_checkpointing,
+        resume_from_full_state_checkpoint=resume_from_full_state_checkpoint,
     )
 
     # once done, tear down distributed environment
