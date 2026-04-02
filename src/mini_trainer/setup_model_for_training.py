@@ -3,12 +3,14 @@ import inspect
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper as ptd_checkpoint_wrapper
-from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict, set_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from transformers import AutoConfig, AutoTokenizer, Mxfp4Config
@@ -113,6 +115,7 @@ class ModelInitializationContext:
     is_osft: bool = False
     state_dict: dict[str, torch.Tensor] | None = None
     train_dtype: torch.dtype | None = None
+    resume_from_checkpoint: str | None = None
 
 
 def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
@@ -571,15 +574,32 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
         _require_distributed_initialized("OSFT finalization")
         log_rank_0("🔄 [Phase 3] Finalizing OSFT initialization")
 
-        # Step 1: Synchronize non-OSFT parameters across ranks
-        log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
-        model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
-        log_rank_0("   ✓ Non-OSFT parameters distributed")
+        if context.resume_from_checkpoint:
+            # Resume path: load from DCP checkpoint instead of computing SVD
+            log_rank_0("🔄 [OSFT] Loading model state from full-state checkpoint (skipping SVD)")
+            # Synchronize non-OSFT parameters so model structure is correct before DCP load
+            model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+            log_rank_0("   ✓ Non-OSFT parameters distributed")
 
-        # Step 2: Compute distributed SVD and distribute OSFT parameters
-        log_rank_0("🔄 [OSFT] Computing distributed SVD for OSFT parameters")
-        model.compute_distributed_svd(model, context.state_dict)
-        log_rank_0("   ✓ OSFT parameters computed and distributed")
+            # DCP load overwrites all parameters (OSFT and non-OSFT) with checkpoint values
+            log_rank_0("🔄 [OSFT] Loading distributed checkpoint")
+            checkpoint_dir = Path(context.resume_from_checkpoint)
+            dcp_dir = str(checkpoint_dir / "distributed")
+            model_state = get_model_state_dict(model)
+            dcp.load({"model": model_state}, checkpoint_id=dcp_dir)
+            set_model_state_dict(model, model_state)
+            log_rank_0("   ✓ Model state loaded from checkpoint")
+        else:
+            # Normal path: compute distributed SVD
+            # Step 1: Synchronize non-OSFT parameters across ranks
+            log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
+            model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+            log_rank_0("   ✓ Non-OSFT parameters distributed")
+
+            # Step 2: Compute distributed SVD and distribute OSFT parameters
+            log_rank_0("🔄 [OSFT] Computing distributed SVD for OSFT parameters")
+            model.compute_distributed_svd(model, context.state_dict)
+            log_rank_0("   ✓ OSFT parameters computed and distributed")
 
         # Mark OSFT initialization as complete
         model.mark_fsdp2_initialized()
@@ -1237,6 +1257,7 @@ def setup_training_components(
     beta2: float = 0.95,
     eps: float = 1e-8,
     weight_decay: float = 0.0,
+    resume_from_checkpoint: str | None = None,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -1265,6 +1286,7 @@ def setup_training_components(
 
     # Phase 1: Prepare model for FSDP2 wrapping
     init_context = prepare_model_for_fsdp2(model)
+    init_context.resume_from_checkpoint = resume_from_checkpoint
 
     # Phase 2: Pure FSDP2 wrapping
     model = wrap_fsdp2(model)
