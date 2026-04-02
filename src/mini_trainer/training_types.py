@@ -235,3 +235,20 @@ class TrainingArgs:
         default=0.0,
         metadata={"help": "Minimum validation loss improvement required to trigger a save"},
     )
+
+    # On-demand full-state checkpointing
+    on_demand_checkpointing: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable signal-driven full-state checkpointing. When enabled, the training process "
+            "will catch termination signals (SIGTERM, SIGINT, SIGUSR1, etc.) and save complete training "
+            "state (model, optimizer, scheduler, RNG) before exiting."
+        },
+    )
+    resume_from_full_state_checkpoint: str | None = field(
+        default=None,
+        metadata={
+            "help": "Path to a full-state checkpoint directory to resume training from. "
+            "The checkpoint must have been saved by the on-demand checkpointing system."
+        },
+    )
