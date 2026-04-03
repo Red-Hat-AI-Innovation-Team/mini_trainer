@@ -575,51 +575,28 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
         log_rank_0("🔄 [Phase 3] Finalizing OSFT initialization")
 
         if context.resume_from_checkpoint:
-            # Resume path: load ALL parameters from DCP checkpoint, skipping SVD.
-            # Strategy: read full (unsharded) state dict on rank 0 from DCP,
-            # then broadcast to materialize meta tensors on all ranks.
-            log_rank_0("🔄 [OSFT] Loading model state from full-state checkpoint (skipping SVD)")
+            # Resume path: run normal initialization to materialize all meta tensors
+            # with correct FSDP2 sharding, then overwrite with checkpoint values.
+            log_rank_0("🔄 [OSFT] Initializing model structure, then loading checkpoint state")
+
+            # Step 1: Normal materialization (non-OSFT sync + SVD)
+            log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
+            model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+            log_rank_0("   ✓ Non-OSFT parameters distributed")
+
+            log_rank_0("🔄 [OSFT] Computing initial SVD (will be overwritten by checkpoint)")
+            model.compute_distributed_svd(model, context.state_dict)
+            log_rank_0("   ✓ SVD complete, model materialized")
+
+            # Step 2: Overwrite with checkpoint values via DCP sharded load.
+            # Use model.state_dict() directly to get parameter references that
+            # DCP can modify in-place, avoiding set_model_state_dict which can
+            # corrupt FSDP2's internal sharding state.
+            log_rank_0("🔄 [OSFT] Loading checkpoint state via DCP (in-place)")
             checkpoint_dir = Path(context.resume_from_checkpoint)
             dcp_dir = str(checkpoint_dir / "distributed")
-
-            checkpoint_state = {}
-            if dist.get_rank() == 0:
-                # Read DCP metadata to discover tensor shapes/dtypes, then load
-                from torch.distributed.checkpoint import FileSystemReader
-                reader = FileSystemReader(dcp_dir)
-                metadata = reader.read_metadata()
-
-                # Create empty tensors matching the checkpoint structure
-                for fqn, tensor_meta in metadata.state_dict_metadata.items():
-                    if not fqn.startswith("model."):
-                        continue
-                    # Strip the "model." prefix that was added during save
-                    key = fqn[len("model."):]
-                    if hasattr(tensor_meta, 'size') and hasattr(tensor_meta, 'properties'):
-                        checkpoint_state[key] = torch.empty(
-                            tensor_meta.size,
-                            dtype=tensor_meta.properties.dtype,
-                            device="cpu",
-                        )
-                    else:
-                        # Scalar/buffer metadata
-                        checkpoint_state[key] = torch.tensor(0)
-
-                # Load actual values from DCP into these tensors
-                dcp.load({"model": checkpoint_state}, checkpoint_id=dcp_dir, no_dist=True)
-                log_rank_0(f"   ✓ Loaded {len(checkpoint_state)} keys from DCP on rank 0")
-
-            # Broadcast from rank 0 to all ranks, materializing meta tensors
-            set_model_state_dict(
-                model,
-                model_state_dict=checkpoint_state,
-                options=StateDictOptions(
-                    full_state_dict=True,
-                    broadcast_from_rank0=True,
-                    strict=False,
-                ),
-            )
-            log_rank_0("   ✓ Model state loaded from checkpoint")
+            dcp.load({"model": model.state_dict()}, checkpoint_id=dcp_dir)
+            log_rank_0("   ✓ Model state overwritten with checkpoint values")
         else:
             # Normal path: compute distributed SVD
             # Step 1: Synchronize non-OSFT parameters across ranks

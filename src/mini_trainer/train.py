@@ -803,14 +803,24 @@ def train(
         )
 
         # Load optimizer state from DCP checkpoint
-        FullStateCheckpointer.load_distributed_state(
-            resume_from_full_state_checkpoint, model, optimizer
-        )
+        # (Model state was already loaded in finalize_model_initialization)
+        log_rank_0("Loading optimizer state from DCP checkpoint...")
+        import torch.distributed.checkpoint as dcp_module
+        from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
+        checkpoint_dir = Path(resume_from_full_state_checkpoint)
+        dcp_dir = str(checkpoint_dir / "distributed")
+        optim_state = get_optimizer_state_dict(model, optimizer)
+        dcp_module.load({"optimizer": optim_state}, checkpoint_id=dcp_dir)
+        set_optimizer_state_dict(model, optimizer, optim_state)
+        log_rank_0("   ✓ Optimizer state loaded")
+        dist.barrier()
+        log_rank_0("[DEBUG] Post-resume barrier passed")
 
         log_rank_0(f"Resumed at step={step}, epoch={epoch}, samples={total_samples_accumulated}")
 
-    # Track samples for batch-skipping when resuming mid-epoch
-    _resume_target_samples = total_samples_accumulated if resume_from_full_state_checkpoint else None
+    # Track steps for batch-skipping when resuming mid-epoch.
+    # We skip by step count (not sample count) to stay consistent across ranks.
+    _resume_target_step = step if resume_from_full_state_checkpoint else None
 
     # main training loop
     while not reached_stop_condition(
@@ -826,16 +836,16 @@ def train(
         data_loader.sampler.set_epoch(epoch)
         data_loader_it = iter(data_loader)
 
-        _skipped_samples = 0
+        _skipped_steps = 0
         for batch in data_loader_it:
             # Skip already-processed batches when resuming mid-epoch
-            if _resume_target_samples is not None:
-                _skipped_samples += sum(mb["num_samples"] for mb in batch)
-                if _skipped_samples < _resume_target_samples:
+            if _resume_target_step is not None:
+                _skipped_steps += 1
+                if _skipped_steps < _resume_target_step:
                     continue
                 # Done skipping — clear the resume state
-                _resume_target_samples = None
-                log_rank_0(f"Skipped {_skipped_samples} samples to resume position")
+                log_rank_0(f"Skipped {_skipped_steps} batches to resume position (target step={_resume_target_step})")
+                _resume_target_step = None
 
             batch_start_time = time.time()
             batch_totals.reset_batch()
