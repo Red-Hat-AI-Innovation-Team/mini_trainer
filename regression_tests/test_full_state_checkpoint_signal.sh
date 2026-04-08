@@ -42,7 +42,7 @@ echo "Training PID: $TRAIN_PID"
 echo "Waiting for training to start..."
 STARTED=false
 for i in $(seq 1 180); do
-    METRICS_FILE=$(ls "$OUTPUT_DIR"/training_metrics_*.jsonl 2>/dev/null | head -1)
+    METRICS_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'training_metrics_*.jsonl' -print -quit 2>/dev/null)
     if [ -n "$METRICS_FILE" ]; then
         LINES=$(wc -l < "$METRICS_FILE")
         if [ "$LINES" -ge 5 ]; then
@@ -167,8 +167,8 @@ if [ $RESUME_EXIT -ne 0 ]; then
 fi
 
 # Check that training continued from the checkpoint step
-RESUMED_STEPS=$(grep '"step"' "$OUTPUT_DIR/resume.log" | wc -l)
-FIRST_RESUMED_STEP=$(grep '"step"' "$OUTPUT_DIR/resume.log" | head -1 | grep -o '[0-9]*' | tail -1)
+RESUMED_STEPS=$(grep -c '"step":' "$OUTPUT_DIR/resume.log" || echo 0)
+FIRST_RESUMED_STEP=$(grep '"step":' "$OUTPUT_DIR/resume.log" | head -1 | python -c "import sys,re; print(re.search(r'\"step\":\s*(\d+)', sys.stdin.read()).group(1))" 2>/dev/null || echo 0)
 echo "  Resumed training ran $RESUMED_STEPS steps, starting from step $FIRST_RESUMED_STEP"
 
 if [ "$FIRST_RESUMED_STEP" -le "$CKPT_STEP" ]; then
