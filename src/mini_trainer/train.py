@@ -15,10 +15,10 @@ from typer import Option, Typer
 from mini_trainer import mlflow_wrapper, wandb_wrapper
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer.batch_metrics import BatchMetrics
+from mini_trainer.full_state_checkpoint import FullStateCheckpointer
 from mini_trainer.sampler import get_data_loader
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.training_types import PretrainingConfig, TrainingMode
-from mini_trainer.full_state_checkpoint import FullStateCheckpointer
 from mini_trainer.utils import (
     destroy_distributed_environment,
     get_node_rank,
@@ -798,15 +798,14 @@ def train(
         data_loader.sampler.set_epoch(meta["sampler_epoch"])
 
         # Restore per-rank RNG states
-        FullStateCheckpointer.load_rng_states(
-            resume_from_full_state_checkpoint, rank=dist.get_rank()
-        )
+        FullStateCheckpointer.load_rng_states(resume_from_full_state_checkpoint, rank=dist.get_rank())
 
         # Load optimizer state from DCP checkpoint
         # (Model state was already loaded in finalize_model_initialization)
         log_rank_0("Loading optimizer state from DCP checkpoint...")
         import torch.distributed.checkpoint as dcp_module
         from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
+
         checkpoint_dir = Path(resume_from_full_state_checkpoint)
         dcp_dir = str(checkpoint_dir / "distributed")
         optim_state = get_optimizer_state_dict(model, optimizer)

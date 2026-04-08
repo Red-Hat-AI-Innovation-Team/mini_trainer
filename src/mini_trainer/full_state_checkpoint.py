@@ -96,9 +96,7 @@ class FullStateCheckpointer:
         """
         local_triggered = self._trigger_path.exists()
         if dist.is_initialized():
-            trigger_tensor = torch.tensor(
-                int(local_triggered), dtype=torch.int32, device=device
-            )
+            trigger_tensor = torch.tensor(int(local_triggered), dtype=torch.int32, device=device)
             dist.all_reduce(trigger_tensor, op=dist.ReduceOp.MAX)
             return trigger_tensor.item() > 0
         return local_triggered

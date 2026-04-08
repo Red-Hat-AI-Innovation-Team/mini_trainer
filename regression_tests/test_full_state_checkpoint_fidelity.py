@@ -51,7 +51,7 @@ def hash_parameters(model: torch.nn.Module) -> str:
         h.update(name.encode())
         # Use local tensor for DTensor to avoid all-gather
         p = param.detach()
-        if hasattr(p, '_local_tensor'):
+        if hasattr(p, "_local_tensor"):
             p = p._local_tensor
         h.update(p.float().cpu().numpy().tobytes())
     return h.hexdigest()
@@ -69,10 +69,11 @@ def record_step_metrics(step, loss, grad_norm, lr, param_hash):
 
 def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
     """Run training and record per-step metrics."""
-    from mini_trainer.setup_model_for_training import setup_model, setup_training_components
-    from mini_trainer.sampler import get_data_loader
-    from mini_trainer.utils import init_distributed_environment, set_seed
     from mini_trainer.full_state_checkpoint import FullStateCheckpointer
+    from mini_trainer.sampler import get_data_loader
+    from mini_trainer.setup_model_for_training import setup_model, setup_training_components
+    from mini_trainer.utils import init_distributed_environment, set_seed
+
     # Use inline gradient step to avoid validate_training_state dtype checks
     def take_gradient_step(model, optimizer, lr_scheduler):
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -126,8 +127,9 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
         FullStateCheckpointer.load_rng_states(resume_checkpoint, rank)
 
         # Load optimizer state from DCP
-        from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
         import torch.distributed.checkpoint as dcp_module
+        from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
+
         optim_state = get_optimizer_state_dict(model, optimizer)
         dcp_module.load({"optimizer": optim_state}, checkpoint_id=str(resume_checkpoint + "/distributed"))
         set_optimizer_state_dict(model, optimizer, optim_state)
@@ -166,14 +168,18 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
             grad_norm = take_gradient_step(model, optimizer, lr_scheduler)
 
             if rank == 0:
-                metrics.append(record_step_metrics(
-                    step=step,
-                    loss=loss.detach().cpu().item(),
-                    grad_norm=grad_norm.item(),
-                    lr=current_lr,
-                    param_hash=hash_parameters(model),
-                ))
-                print(f"  step={step} loss={loss.detach().cpu().item():.6f} grad_norm={grad_norm.item():.6f} lr={current_lr:.8f}")
+                metrics.append(
+                    record_step_metrics(
+                        step=step,
+                        loss=loss.detach().cpu().item(),
+                        grad_norm=grad_norm.item(),
+                        lr=current_lr,
+                        param_hash=hash_parameters(model),
+                    )
+                )
+                print(
+                    f"  step={step} loss={loss.detach().cpu().item():.6f} grad_norm={grad_norm.item():.6f} lr={current_lr:.8f}"
+                )
 
             dist.barrier()
 
@@ -274,9 +280,7 @@ if __name__ == "__main__":
     elif args.mode == "checkpoint":
         run_training(args, checkpoint_at_step=args.checkpoint_at_step)
     elif args.mode == "resume":
-        ckpt_dir = os.path.join(
-            args.output_dir, "full_state_checkpoints", f"step_{args.checkpoint_at_step}"
-        )
+        ckpt_dir = os.path.join(args.output_dir, "full_state_checkpoints", f"step_{args.checkpoint_at_step}")
         run_training(args, resume_checkpoint=ckpt_dir)
     elif args.mode == "compare":
         compare_trajectories(args.output_dir)
