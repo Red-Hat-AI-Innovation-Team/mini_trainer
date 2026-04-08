@@ -8,7 +8,7 @@ set -euo pipefail
 
 MODEL="${1:-/tmp/tiny_qwen2}"
 DATA="${2:-/tmp/tiny_test.jsonl}"
-OUTPUT_DIR="${3:-/mnt/nvme3n1/workspace/osilkin/pr-repos/async-checkpointing/mini_trainer/multi_node_fidelity_output}"
+OUTPUT_DIR="${3:-/tmp/multi_node_fidelity_output}"
 TOTAL_STEPS=20
 CHECKPOINT_STEP=10
 SCRIPT="regression_tests/test_full_state_checkpoint_fidelity.py"

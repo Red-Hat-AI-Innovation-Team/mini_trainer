@@ -7,7 +7,7 @@ set -euo pipefail
 
 MODEL="${1:-/tmp/tiny_qwen2}"
 DATA="${2:-/tmp/tiny_test.jsonl}"
-OUTPUT_DIR="/mnt/nvme3n1/workspace/osilkin/pr-repos/async-checkpointing/mini_trainer/signal_test_output"
+OUTPUT_DIR="${3:-/tmp/signal_test_output}"
 TRIGGER_FILE="/dev/shm/mini_trainer_checkpoint_trigger"
 
 rm -rf "$OUTPUT_DIR"

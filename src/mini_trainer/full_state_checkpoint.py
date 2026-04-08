@@ -102,8 +102,14 @@ class FullStateCheckpointer:
         return local_triggered
 
     def cleanup(self):
-        """Remove the trigger file if it exists."""
+        """Remove the trigger file and restore original signal handlers."""
         self._trigger_path.unlink(missing_ok=True)
+        for sig, handler in self._original_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (OSError, ValueError):
+                pass
+        self._original_handlers.clear()
 
     def save(
         self,
@@ -150,7 +156,7 @@ class FullStateCheckpointer:
         self._save_rng_states(save_dir)
 
         # 3. Save global metadata (rank 0 only)
-        sampler_epoch = getattr(data_loader.sampler, "_epoch", 0)
+        sampler_epoch = data_loader.sampler.epoch
         if self._rank == 0:
             self._save_metadata(
                 save_dir=save_dir,
