@@ -804,16 +804,13 @@ def train(
         # (Model state was already loaded in finalize_model_initialization)
         log_rank_0("Loading optimizer state from DCP checkpoint...")
         import torch.distributed.checkpoint as dcp_module
-        from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
 
         checkpoint_dir = Path(resume_from_full_state_checkpoint)
         dcp_dir = str(checkpoint_dir / "distributed")
-        optim_state = get_optimizer_state_dict(model, optimizer)
+        optim_state = optimizer.state_dict()
         dcp_module.load({"optimizer": optim_state}, checkpoint_id=dcp_dir)
-        set_optimizer_state_dict(model, optimizer, optim_state)
+        optimizer.load_state_dict(optim_state)
         log_rank_0("   ✓ Optimizer state loaded")
-        dist.barrier()
-        log_rank_0("[DEBUG] Post-resume barrier passed")
 
         log_rank_0(f"Resumed at step={step}, epoch={epoch}, samples={total_samples_accumulated}")
 
@@ -968,7 +965,8 @@ def train(
                 )
                 full_state_checkpointer.cleanup()
                 log_rank_0("Full-state checkpoint saved. Exiting.")
-                sys.exit(0)
+                destroy_distributed_environment()
+                os._exit(0)
 
             # sample-based saving, keep in the inner loop
             if checkpointer.should_save_checkpoint(

@@ -21,9 +21,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
-    get_optimizer_state_dict,
     set_model_state_dict,
-    set_optimizer_state_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,8 +143,11 @@ class FullStateCheckpointer:
         logger.info("Rank %d: saving full-state checkpoint to %s", self._rank, save_dir)
 
         # 1. Save model + optimizer state via DCP (sharded, all ranks participate)
+        # We use optimizer.state_dict() directly instead of get_optimizer_state_dict()
+        # because the latter fails with FSDP2 when the optimizer was created with only
+        # trainable parameters (KeyError on parameter ID mapping).
         model_state = get_model_state_dict(model)
-        optim_state = get_optimizer_state_dict(model, optimizer)
+        optim_state = optimizer.state_dict()
         dcp.save(
             {"model": model_state, "optimizer": optim_state},
             checkpoint_id=str(save_dir / "distributed"),
@@ -253,10 +254,10 @@ class FullStateCheckpointer:
         dcp_dir = str(checkpoint_dir / "distributed")
 
         model_state = get_model_state_dict(model)
-        optim_state = get_optimizer_state_dict(model, optimizer)
+        optim_state = optimizer.state_dict()
         dcp.load(
             {"model": model_state, "optimizer": optim_state},
             checkpoint_id=dcp_dir,
         )
         set_model_state_dict(model, model_state)
-        set_optimizer_state_dict(model, optimizer, optim_state)
+        optimizer.load_state_dict(optim_state)

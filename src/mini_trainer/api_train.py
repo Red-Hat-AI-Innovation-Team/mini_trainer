@@ -208,6 +208,12 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if train_args.trust_remote_code:
         command.append("--trust-remote-code")
 
+    if train_args.on_demand_checkpointing:
+        command.append("--on-demand-checkpointing")
+
+    if train_args.resume_from_full_state_checkpoint:
+        command.append(f"--resume-from-full-state-checkpoint={train_args.resume_from_full_state_checkpoint}")
+
     logger.info("Running training command as subprocess: %s", " ".join(command))
 
     # Run the training process
