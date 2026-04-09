@@ -965,7 +965,8 @@ def train(
                 )
                 full_state_checkpointer.cleanup()
                 log_rank_0("Full-state checkpoint saved. Exiting.")
-                destroy_distributed_environment()
+                dist.barrier()
+                dist.destroy_process_group()
                 os._exit(0)
 
             # sample-based saving, keep in the inner loop
