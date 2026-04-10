@@ -1393,6 +1393,36 @@ def main(
         trust_remote_code=trust_remote_code,
     )
 
+    # When resuming, ensure model architecture matches the checkpoint.
+    # The first training run may have resized embeddings (e.g., vocab alignment),
+    # creating a new base model f'. Resume must load f', not re-derive from f.
+    if resume_from_full_state_checkpoint:
+        # Ensure the model's architecture matches the checkpoint (f' not f).
+        # The first training run may have resized embeddings, creating f'.
+        # We read the checkpoint's DCP metadata to get the actual saved embedding
+        # shape and resize if needed so f'' == f'.
+        from torch.distributed.checkpoint import FileSystemReader
+
+        dcp_dir = os.path.join(resume_from_full_state_checkpoint, "distributed")
+        if os.path.isdir(dcp_dir):
+            reader = FileSystemReader(dcp_dir)
+            dcp_meta = reader.read_metadata()
+            for fqn, tensor_meta in dcp_meta.state_dict_metadata.items():
+                if "embed_tokens.weight" in fqn and hasattr(tensor_meta, "size"):
+                    ckpt_embed_size = tensor_meta.size[0]
+                    inner = model
+                    for attr in ["model", "embed_tokens"]:
+                        inner = getattr(inner, attr, inner)
+                    if hasattr(inner, "weight"):
+                        current_size = inner.weight.shape[0]
+                        if current_size != ckpt_embed_size:
+                            log_rank_0(
+                                f"Resizing model embeddings from {current_size} to {ckpt_embed_size} "
+                                f"to match checkpoint (f' architecture)"
+                            )
+                            model.resize_token_embeddings(ckpt_embed_size)
+                    break
+
     # Create PretrainingConfig if block_size is provided
     pretraining_config = None
     if block_size is not None:

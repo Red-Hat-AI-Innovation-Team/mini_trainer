@@ -156,7 +156,14 @@ class FullStateCheckpointer:
         # 2. Save per-rank RNG states
         self._save_rng_states(save_dir)
 
-        # 3. Save global metadata (rank 0 only)
+        # 3. Save model config for architecture consistency on resume
+        # The model may have been modified (e.g., vocab resize) during the first
+        # run, so we save the config to ensure resume loads the same architecture.
+        inner = getattr(model, "module", model)
+        if self._rank == 0 and hasattr(inner, "config"):
+            inner.config.save_pretrained(save_dir)
+
+        # 4. Save global metadata (rank 0 only)
         sampler_epoch = data_loader.sampler.epoch
         if self._rank == 0:
             self._save_metadata(

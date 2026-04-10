@@ -585,27 +585,30 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
 
             device = f"cuda:{dist.get_rank()}"
             materialized = 0
+
+            def _materialize_dtensor(dt, device):
+                """Create a zero-filled DTensor preserving the original global shape."""
+                new_local = torch.zeros_like(dt._local_tensor, device=device)
+                # Preserve the original global shape (not local * world_size which may over-count
+                # due to FSDP2 padding the last shard).
+                return DTensor.from_local(
+                    new_local,
+                    device_mesh=dt.device_mesh,
+                    placements=dt.placements,
+                    run_check=False,
+                    shape=dt.shape,  # preserve global shape
+                    stride=dt.stride(),  # preserve global stride
+                )
+
             for _, mod in model.named_modules():
                 for param_name, param in list(mod._parameters.items()):
                     if param is not None and isinstance(param, DTensor) and param._local_tensor.is_meta:
-                        new_local = torch.zeros_like(param._local_tensor, device=device)
-                        new_dt = DTensor.from_local(
-                            new_local,
-                            device_mesh=param.device_mesh,
-                            placements=param.placements,
-                            run_check=False,
-                        )
+                        new_dt = _materialize_dtensor(param, device)
                         mod._parameters[param_name] = torch.nn.Parameter(new_dt, requires_grad=param.requires_grad)
                         materialized += 1
                 for buf_name, buf in list(mod._buffers.items()):
                     if buf is not None and isinstance(buf, DTensor) and buf._local_tensor.is_meta:
-                        new_local = torch.zeros_like(buf._local_tensor, device=device)
-                        new_dt = DTensor.from_local(
-                            new_local,
-                            device_mesh=buf.device_mesh,
-                            placements=buf.placements,
-                            run_check=False,
-                        )
+                        new_dt = _materialize_dtensor(buf, device)
                         mod._buffers[buf_name] = new_dt
                         materialized += 1
             log_rank_0(f"   ✓ Materialized {materialized} meta DTensors")
