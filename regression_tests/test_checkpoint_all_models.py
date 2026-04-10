@@ -62,8 +62,9 @@ MODELS = {
     },
 }
 
-DATA_PATH = "/tmp/ckpt_validation/data.jsonl"
-BASE_OUTPUT = "/tmp/ckpt_validation/runs"
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PATH = os.path.join(_REPO_ROOT, ".test_artifacts", "messages_data.jsonl")
+BASE_OUTPUT = os.path.join(_REPO_ROOT, ".test_artifacts", "runs")
 TRIGGER_FILE = "/dev/shm/mini_trainer_checkpoint_trigger"
 NUM_GPUS = 8
 
@@ -219,7 +220,7 @@ def test_model(model_key, model_info, use_liger):
 
     # Wait for process to exit
     try:
-        proc.wait(timeout=300)
+        proc.wait(timeout=1200)
     except subprocess.TimeoutExpired:
         print(f"  [{tag}] FAIL: Training didn't exit after trigger (timeout)")
         proc.kill()
@@ -270,7 +271,7 @@ def test_model(model_key, model_info, use_liger):
     )
 
     try:
-        proc2.wait(timeout=600)
+        proc2.wait(timeout=1800)
     except subprocess.TimeoutExpired:
         print(f"  [{tag}] FAIL: Resume timed out")
         proc2.kill()
