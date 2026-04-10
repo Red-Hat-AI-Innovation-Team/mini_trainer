@@ -613,11 +613,28 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
                         materialized += 1
             log_rank_0(f"   ✓ Materialized {materialized} meta DTensors")
 
-            # Step 2: Load checkpoint values via DCP in-place
+            # Step 2: Load checkpoint values via DCP in-place.
+            # Filter out keys not in the checkpoint (e.g., rotary embedding
+            # buffers like inv_freq that aren't saved but are recomputed).
             log_rank_0("🔄 [OSFT] Loading checkpoint state via DCP")
             checkpoint_dir = Path(context.resume_from_checkpoint)
             dcp_dir = str(checkpoint_dir / "distributed")
-            dcp.load({"model": model.state_dict()}, checkpoint_id=dcp_dir)
+            from torch.distributed.checkpoint import FileSystemReader
+
+            reader = FileSystemReader(dcp_dir)
+            ckpt_metadata = reader.read_metadata()
+            ckpt_keys = {k[len("model.") :] for k in ckpt_metadata.state_dict_metadata if k.startswith("model.")}
+
+            sd = model.state_dict()
+            # Only load keys that exist in both the model and the checkpoint
+            missing_in_ckpt = set(sd.keys()) - ckpt_keys
+            if missing_in_ckpt:
+                log_rank_0(
+                    f"   Skipping {len(missing_in_ckpt)} model keys not in checkpoint (e.g., {next(iter(missing_in_ckpt))})"
+                )
+                sd = {k: v for k, v in sd.items() if k in ckpt_keys}
+
+            dcp.load({"model": sd}, checkpoint_id=dcp_dir)
             log_rank_0("   ✓ Model state loaded from checkpoint")
         else:
             # Normal path: compute distributed SVD
