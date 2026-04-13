@@ -77,9 +77,16 @@ def clean_trigger():
         pass
 
 
-def run_osft_training(model_id, output_dir, use_liger, trust_remote_code,
-                      osft_target_patterns, on_demand=False, resume_path=None,
-                      max_steps=30):
+def run_osft_training(
+    model_id,
+    output_dir,
+    use_liger,
+    trust_remote_code,
+    osft_target_patterns,
+    on_demand=False,
+    resume_path=None,
+    max_steps=30,
+):
     """Launch OSFT training via training_hub.osft() and return the process."""
     # Use training_hub's osft function via a subprocess python call
     # This handles data processing + torchrun automatically
@@ -117,12 +124,17 @@ osft(
     {("osft_target_patterns='" + osft_target_patterns + "',") if osft_target_patterns else ""}
 )
 """
+    # Write stdout to a log file instead of PIPE to avoid blocking on
+    # grandchild processes (torchrun workers) that inherit the pipe.
+    log_path = os.path.join(output_dir, "subprocess.log")
+    log_fh = open(log_path, "w")
     proc = subprocess.Popen(
-        [sys.executable, "-c", script],
-        stdout=subprocess.PIPE,
+        [sys.executable, "-u", "-c", script],
+        stdout=log_fh,
         stderr=subprocess.STDOUT,
-        text=True,
     )
+    proc._log_fh = log_fh  # keep reference for cleanup
+    proc._log_path = log_path
     return proc
 
 
@@ -139,7 +151,7 @@ def wait_for_steps(output_dir, min_steps=5, timeout=600):
                         lines = sum(1 for _ in fh)
                     if lines >= min_steps:
                         return True
-                except (IOError, OSError):
+                except OSError:
                     pass
         time.sleep(2)
     return False
@@ -164,9 +176,9 @@ def test_model(model_key, model_info, use_liger):
     tag = f"{model_key}_{liger_str}"
     output_dir = os.path.join(BASE_OUTPUT, tag)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {tag}: {model_info['model_id']}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # Clean up from any previous run
     if os.path.exists(output_dir):
@@ -192,7 +204,7 @@ def test_model(model_key, model_info, use_liger):
         # Check if process died (OOM or other error)
         ret = proc.poll()
         if ret is not None:
-            output = proc.stdout.read()
+            output = open(proc._log_path).read() if hasattr(proc, "_log_path") else ""
             if "CUDA out of memory" in output or "OutOfMemoryError" in output:
                 print(f"  [{tag}] SKIP: OOM — model too large for {NUM_GPUS} GPUs")
                 shutil.rmtree(output_dir, ignore_errors=True)
@@ -228,7 +240,8 @@ def test_model(model_key, model_info, use_liger):
         shutil.rmtree(output_dir, ignore_errors=True)
         return "fail"
 
-    output_phase1 = proc.stdout.read()
+    proc._log_fh.close()
+    output_phase1 = open(proc._log_path).read()
 
     # Check exit code
     if proc.returncode != 0:
@@ -280,7 +293,8 @@ def test_model(model_key, model_info, use_liger):
         shutil.rmtree(resume_dir, ignore_errors=True)
         return "fail"
 
-    output_phase2 = proc2.stdout.read()
+    proc2._log_fh.close()
+    output_phase2 = open(proc2._log_path).read()
 
     if proc2.returncode != 0:
         if "CUDA out of memory" in output_phase2 or "OutOfMemoryError" in output_phase2:
@@ -316,9 +330,9 @@ def main():
             results[tag] = result
 
     # Summary
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  RESULTS SUMMARY")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     passes = sum(1 for v in results.values() if v == "pass")
     fails = sum(1 for v in results.values() if v == "fail")
     skips = sum(1 for v in results.values() if v.startswith("skip"))
