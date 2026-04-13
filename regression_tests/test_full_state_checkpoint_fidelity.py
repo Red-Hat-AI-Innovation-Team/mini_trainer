@@ -127,13 +127,12 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
         lr_scheduler.load_state_dict(meta["lr_scheduler_state"])
         FullStateCheckpointer.load_rng_states(resume_checkpoint, rank)
 
-        # Load optimizer state from DCP
+        # Load optimizer state from DCP (same approach as production code)
         import torch.distributed.checkpoint as dcp_module
-        from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
 
-        optim_state = get_optimizer_state_dict(model, optimizer)
+        optim_state = optimizer.state_dict()
         dcp_module.load({"optimizer": optim_state}, checkpoint_id=str(Path(resume_checkpoint) / "distributed"))
-        set_optimizer_state_dict(model, optimizer, optim_state)
+        optimizer.load_state_dict(optim_state)
 
         data_loader.sampler.set_epoch(meta["sampler_epoch"])
 
@@ -215,7 +214,7 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
                     print(f"Checkpoint saved at step {step}. Exiting.")
                 dist.barrier()
                 dist.destroy_process_group()
-                sys.exit(0)
+                os._exit(0)
 
             if step >= args.total_steps:
                 break

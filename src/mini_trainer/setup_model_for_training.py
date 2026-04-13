@@ -578,12 +578,17 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
             # Resume path: materialize meta DTensors without SVD, then load from DCP.
             log_rank_0("🔄 [OSFT] Resuming from checkpoint (skipping SVD)")
 
+            # The original HF state dict is not needed on resume — free it.
+            context.state_dict = None
+            gc.collect()
+
             # Step 1: Materialize all meta DTensors by replacing their local shards
             # with zero-initialized tensors on the correct device. This preserves
             # FSDP2's sharding metadata while moving params off meta device.
             from torch.distributed._tensor import DTensor
 
-            device = f"cuda:{dist.get_rank()}"
+            # Use local CUDA device (not global rank, which breaks on multi-node)
+            device = torch.device("cuda", torch.cuda.current_device())
             materialized = 0
 
             def _materialize_dtensor(dt, device):

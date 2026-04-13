@@ -144,6 +144,7 @@ echo "  OK: Checkpoint at step $CKPT_STEP"
 
 echo ""
 echo "=== Phase 3: Resume from checkpoint ==="
+RESUME_EXIT=0
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nnodes=1 --nproc-per-node=4 \
     -m mini_trainer.train \
     --model-name-or-path "$MODEL" \
@@ -157,9 +158,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nnodes=1 --nproc-per-node=4 \
     --osft \
     --osft-unfreeze-rank-ratio 0.2 \
     --resume-from-full-state-checkpoint "$STEP_DIR" \
-    > "$OUTPUT_DIR/resume.log" 2>&1
-
-RESUME_EXIT=$?
+    > "$OUTPUT_DIR/resume.log" 2>&1 || RESUME_EXIT=$?
 if [ $RESUME_EXIT -ne 0 ]; then
     echo "FAIL: Resume training exited with code $RESUME_EXIT"
     grep "Error\|Traceback" "$OUTPUT_DIR/resume.log" | head -5

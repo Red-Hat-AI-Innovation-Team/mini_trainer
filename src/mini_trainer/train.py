@@ -837,10 +837,10 @@ def train(
             # Skip already-processed batches when resuming mid-epoch
             if _resume_target_step is not None:
                 _skipped_steps += 1
-                if _skipped_steps < _resume_target_step:
+                if _skipped_steps <= _resume_target_step:
                     continue
                 # Done skipping — clear the resume state
-                log_rank_0(f"Skipped {_skipped_steps} batches to resume position (target step={_resume_target_step})")
+                log_rank_0(f"Skipped {_resume_target_step} batches to resume position")
                 _resume_target_step = None
 
             batch_start_time = time.time()

@@ -96,8 +96,15 @@ class FullStateCheckpointer:
         if dist.is_initialized():
             trigger_tensor = torch.tensor(int(local_triggered), dtype=torch.int32, device=device)
             dist.all_reduce(trigger_tensor, op=dist.ReduceOp.MAX)
-            return trigger_tensor.item() > 0
-        return local_triggered
+            should_save = trigger_tensor.item() > 0
+        else:
+            should_save = local_triggered
+
+        # Clear trigger file immediately to prevent stale triggers
+        # across restarts or subsequent should_save() calls.
+        if should_save:
+            self._trigger_path.unlink(missing_ok=True)
+        return should_save
 
     def cleanup(self):
         """Remove the trigger file and restore original signal handlers."""
