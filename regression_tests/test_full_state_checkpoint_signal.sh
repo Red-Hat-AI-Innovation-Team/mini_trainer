@@ -75,8 +75,8 @@ echo "Waiting for training to checkpoint and exit..."
 EXITED=false
 for i in $(seq 1 120); do
     if ! kill -0 "$TRAIN_PID" 2>/dev/null; then
-        wait "$TRAIN_PID" 2>/dev/null
-        EXIT_CODE=$?
+        EXIT_CODE=0
+        wait "$TRAIN_PID" 2>/dev/null || EXIT_CODE=$?
         echo "Training exited with code: $EXIT_CODE"
         EXITED=true
         break
