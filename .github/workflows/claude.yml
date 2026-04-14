@@ -69,6 +69,12 @@ jobs:
         with:
           use_vertex: true
           claude_args: "--model claude-opus-4-6[1m] --effort max"
+          plugins: |
+            code-review@claude-plugins-official
+            commit-commands@claude-plugins-official
+            feature-dev@claude-plugins-official
+            huggingface-skills@claude-plugins-official
+            frontend-design@claude-plugins-official
         env:
           ANTHROPIC_VERTEX_PROJECT_ID: ${{ secrets.GCP_PROJECT }}
           CLOUD_ML_REGION: ${{ secrets.GCP_REGION }}
