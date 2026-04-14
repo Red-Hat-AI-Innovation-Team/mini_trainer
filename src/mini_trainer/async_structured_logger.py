@@ -3,6 +3,7 @@
 # Standard
 import asyncio
 import json
+import os
 import sys
 import threading
 from datetime import datetime
@@ -104,9 +105,11 @@ class AsyncStructuredLogger:
         if not isinstance(data, dict):
             raise ValueError("Logged data must be a dictionary")
 
-        # Print to console synchronously, but only on rank 0
-        # to avoid duplicate outputs in distributed training
-        should_print = not dist.is_initialized() or dist.get_rank() == 0
+        # Print to console synchronously, but only on local rank 0
+        # to avoid duplicate outputs in distributed training.
+        # Use LOCAL_RANK (not global rank) so every node's rank-0 process
+        # prints training progress in multi-node setups.
+        should_print = not dist.is_initialized() or int(os.environ.get("LOCAL_RANK", 0)) == 0
         if should_print:
             data_with_timestamp = {**data, "timestamp": datetime.now().isoformat()}
 
