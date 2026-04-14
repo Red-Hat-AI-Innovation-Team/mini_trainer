@@ -81,19 +81,6 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
     logger.info("Starting training setup...")
 
-    # Deprecation warning for osft_memory_efficient_init
-    if train_args.osft and train_args.osft_memory_efficient_init:
-        import warnings
-
-        warnings.warn(
-            "The 'osft_memory_efficient_init' parameter is deprecated and will be "
-            "removed in mini_trainer v0.5.0. Memory-efficient initialization is now "
-            "automatically enabled for distributed training. This flag no longer has "
-            "any effect.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
     # Ensure output directory exists
     output_path = Path(train_args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -194,8 +181,6 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
             command.append(f"--osft-upcast-dtype={train_args.osft_upcast_dtype}")
         if train_args.osft_output_dtype:
             command.append(f"--osft-output-dtype={train_args.osft_output_dtype}")
-        # osft_memory_efficient_init is deprecated - memory-efficient init is automatic in distributed mode
-
     if train_args.checkpoint_at_epoch:
         command.append("--checkpoint-at-epoch")
 
