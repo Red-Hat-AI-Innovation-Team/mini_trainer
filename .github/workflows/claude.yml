@@ -53,6 +53,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch PR refs for fork PRs
+        run: git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*'
+
       - name: Load shared skills
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
