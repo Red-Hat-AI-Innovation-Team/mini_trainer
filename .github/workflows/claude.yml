@@ -12,38 +12,10 @@ on:
 
 jobs:
   claude:
-    if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude'))
-    runs-on: ubuntu-latest
+    uses: Red-Hat-AI-Innovation-Team/.github/.github/workflows/claude-code.yml@main
+    secrets: inherit
     permissions:
       contents: write
       issues: write
       pull-requests: write
       id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Run Claude Code
-        uses: anthropics/claude-code-action@v1
-        with:
-          use_vertex: true
-          claude_args: "--model claude-opus-4-6[1m] --effort max"
-        env:
-          ANTHROPIC_VERTEX_PROJECT_ID: ${{ secrets.GCP_PROJECT }}
-          CLOUD_ML_REGION: ${{ secrets.GCP_REGION }}
-          CLAUDE_CODE_SUBAGENT_MODEL: "claude-opus-4-6[1m]"
-          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
-          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-6[1m]"
-          CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1"
-          MAX_THINKING_TOKENS: "128000"
