@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+import random
 import sys
 import time
 from pathlib import Path
 from typing import Annotated, Literal
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTensor is available
@@ -800,16 +802,20 @@ def train(
         # Restore per-rank RNG states
         FullStateCheckpointer.load_rng_states(resume_from_full_state_checkpoint, rank=dist.get_rank())
 
-        # Load optimizer state from DCP checkpoint
-        # (Model state was already loaded in finalize_model_initialization)
-        log_rank_0("Loading optimizer state from DCP checkpoint...")
-        import torch.distributed.checkpoint as dcp_module
-
-        checkpoint_dir = Path(resume_from_full_state_checkpoint)
-        dcp_dir = str(checkpoint_dir / "distributed")
-        optim_state = optimizer.state_dict()
-        dcp_module.load({"optimizer": optim_state}, checkpoint_id=dcp_dir)
-        optimizer.load_state_dict(optim_state)
+        # Load optimizer state (model state was loaded in finalize_model_initialization).
+        # We need to pre-populate optimizer state entries (exp_avg, exp_avg_sq, step)
+        # before loading, because the checkpoint was saved with DTensor shards that
+        # need matching DTensor structure in the optimizer.
+        log_rank_0("Loading optimizer state...")
+        for group in optimizer.param_groups:
+            for p in group["params"]:
+                if p not in optimizer.state:
+                    optimizer.state[p] = {
+                        "step": torch.tensor(0.0),
+                        "exp_avg": torch.zeros_like(p),
+                        "exp_avg_sq": torch.zeros_like(p),
+                    }
+        FullStateCheckpointer.load_optimizer_state(resume_from_full_state_checkpoint, optimizer, rank=dist.get_rank())
         log_rank_0("   ✓ Optimizer state loaded")
 
         log_rank_0(f"Resumed at step={step}, epoch={epoch}, samples={total_samples_accumulated}")
@@ -842,6 +848,17 @@ def train(
                 # Done skipping — clear the resume state
                 log_rank_0(f"Skipped {_resume_target_step} batches to resume position")
                 _resume_target_step = None
+
+            # Snapshot RNG state at the start of this training step, BEFORE
+            # any gradient accumulation. If we checkpoint mid-step, we save
+            # this snapshot so resume replays the step from the beginning.
+            _rng_snapshot = {
+                "torch_rng": torch.get_rng_state(),
+                "python_rng": random.getstate(),
+                "numpy_rng": np.random.get_state(),
+            }
+            if torch.cuda.is_available() and torch.cuda.is_initialized():
+                _rng_snapshot["cuda_rng"] = torch.cuda.get_rng_state()
 
             batch_start_time = time.time()
             batch_totals.reset_batch()
@@ -962,6 +979,7 @@ def train(
                     },
                     data_loader=data_loader,
                     device=device,
+                    rng_snapshot=_rng_snapshot,
                 )
                 full_state_checkpointer.cleanup()
                 log_rank_0("Full-state checkpoint saved. Exiting.")

@@ -127,12 +127,17 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
         lr_scheduler.load_state_dict(meta["lr_scheduler_state"])
         FullStateCheckpointer.load_rng_states(resume_checkpoint, rank)
 
-        # Load optimizer state from DCP (same approach as production code)
-        import torch.distributed.checkpoint as dcp_module
-
-        optim_state = optimizer.state_dict()
-        dcp_module.load({"optimizer": optim_state}, checkpoint_id=str(Path(resume_checkpoint) / "distributed"))
-        optimizer.load_state_dict(optim_state)
+        # Pre-populate optimizer state entries with zeros (matching DTensor structure)
+        # so load_optimizer_state can overwrite them with checkpoint values.
+        for group in optimizer.param_groups:
+            for p in group["params"]:
+                if p not in optimizer.state:
+                    optimizer.state[p] = {
+                        "step": torch.tensor(0.0),
+                        "exp_avg": torch.zeros_like(p),
+                        "exp_avg_sq": torch.zeros_like(p),
+                    }
+        FullStateCheckpointer.load_optimizer_state(resume_checkpoint, optimizer, rank)
 
         data_loader.sampler.set_epoch(meta["sampler_epoch"])
 
@@ -145,6 +150,17 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
             if step < start_step:
                 step += 1
                 continue
+
+            # Snapshot RNG at step start for checkpoint fidelity
+            import random as _random
+
+            _rng_snapshot = {
+                "torch_rng": torch.get_rng_state(),
+                "python_rng": _random.getstate(),
+                "numpy_rng": __import__("numpy").random.get_state(),
+            }
+            if torch.cuda.is_available():
+                _rng_snapshot["cuda_rng"] = torch.cuda.get_rng_state()
 
             for mb in batch:
                 model_inputs = {
@@ -208,6 +224,7 @@ def run_training(args, checkpoint_at_step=None, resume_checkpoint=None):
                     },
                     data_loader=data_loader,
                     device=device,
+                    rng_snapshot=_rng_snapshot,
                 )
                 if rank == 0:
                     torch.save(metrics, os.path.join(args.output_dir, "trajectory_first_half.pt"))

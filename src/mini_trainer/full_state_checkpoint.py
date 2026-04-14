@@ -125,6 +125,7 @@ class FullStateCheckpointer:
         checkpointer_state: dict,
         data_loader: torch.utils.data.DataLoader,
         device: torch.device,
+        rng_snapshot: dict | None = None,
     ):
         """Save complete training state for exact resumption.
 
@@ -142,6 +143,9 @@ class FullStateCheckpointer:
                 last_frequency_saved_samples, best_val_loss.
             data_loader: The training data loader (for sampler state).
             device: The device for distributed operations.
+            rng_snapshot: Pre-captured RNG state from the start of the current
+                training step. If None, captures the current RNG state (which
+                may be mid-step and incorrect for replay).
         """
         step = training_state["step"]
         save_dir = self._checkpoint_dir / f"step_{step}"
@@ -149,19 +153,25 @@ class FullStateCheckpointer:
 
         logger.info("Rank %d: saving full-state checkpoint to %s", self._rank, save_dir)
 
-        # 1. Save model + optimizer state via DCP (sharded, all ranks participate)
-        # We use optimizer.state_dict() directly instead of get_optimizer_state_dict()
-        # because the latter fails with FSDP2 when the optimizer was created with only
-        # trainable parameters (KeyError on parameter ID mapping).
+        # 1. Save model state via DCP (sharded, all ranks participate)
         model_state = get_model_state_dict(model)
-        optim_state = optimizer.state_dict()
         dcp.save(
-            {"model": model_state, "optimizer": optim_state},
+            {"model": model_state},
             checkpoint_id=str(save_dir / "distributed"),
         )
 
-        # 2. Save per-rank RNG states
-        self._save_rng_states(save_dir)
+        # 2. Save optimizer state per-rank via torch.save.
+        # We extract local shards from DTensors because:
+        # - DCP requires the target state_dict to already have entries, but
+        #   on resume the fresh optimizer has empty state.
+        # - Plain torch.save of DTensors doesn't preserve sharding correctly.
+        torch.save(
+            self._extract_local_optim_state(optimizer),
+            save_dir / f"optimizer_rank_{self._rank}.pt",
+        )
+
+        # 3. Save per-rank RNG states (use snapshot from step start if provided)
+        self._save_rng_states(save_dir, rng_snapshot=rng_snapshot)
 
         # 3. Save model config for architecture consistency on resume
         # The model may have been modified (e.g., vocab resize) during the first
@@ -202,8 +212,17 @@ class FullStateCheckpointer:
         }
         torch.save(metadata, save_dir / "training_state.pt")
 
-    def _save_rng_states(self, save_dir: Path):
-        """Save per-rank RNG states for exact reproducibility."""
+    def _save_rng_states(self, save_dir: Path, rng_snapshot: dict | None = None):
+        """Save per-rank RNG states for exact reproducibility.
+
+        If rng_snapshot is provided, saves that (captured at step start) instead
+        of the current live RNG state. This is critical because the checkpoint
+        may fire mid-accumulation, and resume needs to replay from step start.
+        """
+        if rng_snapshot is not None:
+            torch.save(rng_snapshot, save_dir / f"rng_state_rank_{self._rank}.pt")
+            return
+
         rng_state = {
             "torch_rng": torch.get_rng_state(),
             "python_rng": random.getstate(),
@@ -250,6 +269,70 @@ class FullStateCheckpointer:
         np.random.set_state(rng_state["numpy_rng"])
         if "cuda_rng" in rng_state and torch.cuda.is_available():
             torch.cuda.set_rng_state(rng_state["cuda_rng"])
+
+    @staticmethod
+    def _extract_local_optim_state(optimizer):
+        """Extract optimizer state with DTensors converted to local CPU shards."""
+        from torch.distributed._tensor import DTensor
+
+        sd = optimizer.state_dict()
+        local_sd = {"state": {}, "param_groups": sd["param_groups"]}
+        for key, state in sd["state"].items():
+            local_state = {}
+            for skey, val in state.items():
+                if isinstance(val, DTensor):
+                    local_state[skey] = val._local_tensor.clone().cpu()
+                elif isinstance(val, torch.Tensor):
+                    local_state[skey] = val.clone().cpu()
+                else:
+                    local_state[skey] = val
+            local_sd["state"][key] = local_state
+        return local_sd
+
+    @staticmethod
+    def load_optimizer_state(
+        checkpoint_dir: str | Path,
+        optimizer: torch.optim.Optimizer,
+        rank: int,
+    ):
+        """Load per-rank optimizer state, reconstructing DTensors from local shards.
+
+        Requires the optimizer to already have state entries (do a dummy step first
+        if the optimizer is fresh).
+
+        Args:
+            checkpoint_dir: Path to the checkpoint directory.
+            optimizer: The optimizer to load state into.
+            rank: The rank whose optimizer state to load.
+        """
+        from torch.distributed._tensor import DTensor
+
+        checkpoint_dir = Path(checkpoint_dir)
+        optim_path = checkpoint_dir / f"optimizer_rank_{rank}.pt"
+        loaded_sd = torch.load(optim_path, weights_only=False)
+
+        current_sd = optimizer.state_dict()
+        for key, state in loaded_sd["state"].items():
+            if key not in current_sd["state"]:
+                current_sd["state"][key] = {}
+            for skey, val in state.items():
+                cur = current_sd["state"].get(key, {}).get(skey)
+                if cur is not None and isinstance(cur, DTensor):
+                    # Reconstruct DTensor from saved local shard
+                    new_local = val.to(cur._local_tensor.device)
+                    current_sd["state"][key][skey] = DTensor.from_local(
+                        new_local,
+                        device_mesh=cur.device_mesh,
+                        placements=cur.placements,
+                        run_check=False,
+                        shape=cur.shape,
+                        stride=cur.stride(),
+                    )
+                elif isinstance(val, torch.Tensor):
+                    current_sd["state"][key][skey] = val
+                else:
+                    current_sd["state"][key][skey] = val
+        optimizer.load_state_dict(current_sd)
 
     @staticmethod
     def load_distributed_state(
