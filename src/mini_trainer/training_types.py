@@ -126,18 +126,6 @@ class TrainingArgs:
             "help": "Output dtype for OSFT. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc."
         },
     )
-    osft_memory_efficient_init: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "DEPRECATED: This flag is now ignored and will be removed in v0.5.0. "
-                "Memory-efficient initialization is automatically enabled for distributed training "
-                "(when torch.distributed is initialized) and disabled for non-distributed scenarios. "
-                "This parameter has no effect and can be safely removed from your configuration."
-            )
-        },
-    )
-
     # Output options
     min_samples_per_checkpoint: int | None = field(
         default=None,
