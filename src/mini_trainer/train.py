@@ -1050,16 +1050,6 @@ def main(
             help="Output dtype for OSFT. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc."
         ),
     ] = None,
-    osft_memory_efficient_init: Annotated[
-        bool,
-        Option(
-            help=(
-                "DEPRECATED: This flag is now ignored and will be removed in v0.5.0. "
-                "Memory-efficient initialization is automatically enabled for distributed training. "
-                "This parameter has no effect and can be safely removed."
-            )
-        ),
-    ] = False,
     output_dir: Annotated[str, Option(help="Directory to save checkpoints and logs (required)")] = ...,
     min_samples_per_checkpoint: Annotated[
         int | None,
@@ -1147,20 +1137,6 @@ def main(
         if osft_target_patterns:
             osft_target_patterns = osft_target_patterns.replace("'", "").replace('"', "").replace(" ", "").split(",")
 
-        # Deprecation warning for osft_memory_efficient_init
-        if osft_memory_efficient_init:
-            import warnings
-
-            warnings.warn(
-                "The 'osft_memory_efficient_init' parameter is deprecated and will be "
-                "removed in mini_trainer v0.5.0. Memory-efficient initialization is now "
-                "automatically enabled for distributed training (when torch.distributed is "
-                "initialized). This flag no longer has any effect and can be safely removed "
-                "from your training configuration.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
     # TODO(osilkin): we should eventually put this validation logic somewhere dedicated but
     # for now it's easy to read here
     if validation_split < 0.0 or validation_split >= 1.0:
@@ -1199,7 +1175,6 @@ def main(
             "osft_target_patterns": osft_target_patterns,
             "osft_upcast_dtype": osft_upcast_dtype,
             "osft_output_dtype": osft_output_dtype,
-            "osft_memory_efficient_init": osft_memory_efficient_init,
             "trust_remote_code": trust_remote_code,
             "output_dir": output_dir,
             "min_samples_per_checkpoint": min_samples_per_checkpoint,
