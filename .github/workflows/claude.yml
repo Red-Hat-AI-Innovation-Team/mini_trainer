@@ -43,23 +43,23 @@ jobs:
           elif [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
             gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}/reactions -f content=eyes
           elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
-            gh api repos/${{ github.repository }}/pulls/comments/${{ github.event.review.id }}/reactions -f content=eyes
+            gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/reactions -f content=eyes
           elif [ "${{ github.event_name }}" = "issues" ]; then
             gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/reactions -f content=eyes
           fi
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Run Claude Code
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@1c8b699d43e9bfed42b48ef15da85d89bab70960 # v1
         with:
           use_vertex: true
           claude_args: "--model claude-opus-4-6[1m] --effort max"
