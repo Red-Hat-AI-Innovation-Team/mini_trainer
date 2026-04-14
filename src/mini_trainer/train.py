@@ -771,6 +771,16 @@ def train(
         full_state_checkpointer.install_signal_handlers()
         log_rank_0("On-demand full-state checkpointing enabled")
 
+        # Warn if model uses quantization — checkpoint/resume may not
+        # preserve quantization state correctly.
+        inner = getattr(model, "module", model)
+        if hasattr(inner, "_fp8_scales") or hasattr(getattr(inner, "config", None), "_fp8_scales"):
+            log_rank_0(
+                "WARNING: Model uses FP8 quantization. On-demand checkpointing "
+                "may not correctly preserve quantization scales on resume. "
+                "Verify checkpoint fidelity before relying on this in production."
+            )
+
     device = next(model.parameters()).device
     epoch = 0
     last_validation_loss = None  # Track the most recent validation loss
