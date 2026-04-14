@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-# Models from model_validation.py — using real HF model IDs
+# All models from model_validation.py
 MODELS = {
     "llama": {
         "model_id": "meta-llama/Llama-3.2-1B-Instruct",
@@ -35,8 +35,18 @@ MODELS = {
         "trust_remote_code": False,
         "osft_target_patterns": None,
     },
+    "qwen3": {
+        "model_id": "qwen/Qwen3-4B-Instruct-2507",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
     "granite": {
         "model_id": "ibm-granite/granite-3.1-8b-instruct",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
+    "granite-moe": {
+        "model_id": "ibm-granite/granite-4.0-h-tiny",
         "trust_remote_code": False,
         "osft_target_patterns": None,
     },
@@ -45,8 +55,38 @@ MODELS = {
         "trust_remote_code": False,
         "osft_target_patterns": None,
     },
+    "gemma3": {
+        "model_id": "google/gemma-3-4b-it",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
+    "gemma3n": {
+        "model_id": "google/gemma-3n-E4B-it",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
     "mistral": {
         "model_id": "mistralai/Mistral-7B-Instruct-v0.3",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
+    "ministral": {
+        "model_id": "mistralai/Ministral-3-3B-Instruct-2512",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
+    "mistral3-vlm": {
+        "model_id": "mistralai/Ministral-3-3B-Reasoning-2512",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
+    "qwen3-vl": {
+        "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+        "trust_remote_code": False,
+        "osft_target_patterns": None,
+    },
+    "qwen3.5": {
+        "model_id": "Qwen/Qwen3.5-4B",
         "trust_remote_code": False,
         "osft_target_patterns": None,
     },
@@ -55,8 +95,8 @@ MODELS = {
         "trust_remote_code": True,
         "osft_target_patterns": "q_proj,k_proj,v_proj,o_proj",
     },
-    "granite-moe": {
-        "model_id": "ibm-granite/granite-4.0-h-tiny",
+    "gpt-oss": {
+        "model_id": "openai/gpt-oss-20b",
         "trust_remote_code": False,
         "osft_target_patterns": None,
     },

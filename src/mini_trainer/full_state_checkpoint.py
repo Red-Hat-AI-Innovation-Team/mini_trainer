@@ -311,28 +311,27 @@ class FullStateCheckpointer:
         optim_path = checkpoint_dir / f"optimizer_rank_{rank}.pt"
         loaded_sd = torch.load(optim_path, weights_only=False)
 
-        current_sd = optimizer.state_dict()
-        for key, state in loaded_sd["state"].items():
-            if key not in current_sd["state"]:
-                current_sd["state"][key] = {}
+        # Write loaded state directly into optimizer.state, bypassing
+        # load_state_dict which may deep-copy and alter DTensor values.
+        # The optimizer.state uses parameter objects as keys; we iterate
+        # param_groups to get the correct param-to-index mapping.
+        param_list = [p for group in optimizer.param_groups for p in group["params"]]
+        for idx_str, state in loaded_sd["state"].items():
+            idx = int(idx_str) if isinstance(idx_str, str) else idx_str
+            if idx >= len(param_list):
+                continue
+            param = param_list[idx]
+            if param not in optimizer.state:
+                optimizer.state[param] = {}
             for skey, val in state.items():
-                cur = current_sd["state"].get(key, {}).get(skey)
+                cur = optimizer.state[param].get(skey)
                 if cur is not None and isinstance(cur, DTensor):
-                    # Reconstruct DTensor from saved local shard
-                    new_local = val.to(cur._local_tensor.device)
-                    current_sd["state"][key][skey] = DTensor.from_local(
-                        new_local,
-                        device_mesh=cur.device_mesh,
-                        placements=cur.placements,
-                        run_check=False,
-                        shape=cur.shape,
-                        stride=cur.stride(),
-                    )
+                    # Copy loaded local shard into existing DTensor's storage
+                    cur._local_tensor.copy_(val.to(cur._local_tensor.device))
                 elif isinstance(val, torch.Tensor):
-                    current_sd["state"][key][skey] = val
+                    optimizer.state[param][skey] = val.to(param.device)
                 else:
-                    current_sd["state"][key][skey] = val
-        optimizer.load_state_dict(current_sd)
+                    optimizer.state[param][skey] = val
 
     @staticmethod
     def load_distributed_state(
