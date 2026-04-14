@@ -38,6 +38,12 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           use_vertex: true
+          claude_args: "--effort max"
         env:
           ANTHROPIC_VERTEX_PROJECT_ID: ${{ secrets.GCP_PROJECT }}
           CLOUD_ML_REGION: ${{ secrets.GCP_REGION }}
+          CLAUDE_CODE_SUBAGENT_MODEL: "claude-opus-4-6[1m]"
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
+          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-6[1m]"
+          CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1"
+          MAX_THINKING_TOKENS: "128000"
