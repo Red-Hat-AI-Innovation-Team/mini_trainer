@@ -75,6 +75,8 @@ jobs:
             feature-dev@claude-plugins-official
             huggingface-skills@claude-plugins-official
             frontend-design@claude-plugins-official
+          plugin_marketplaces: |
+            https://github.com/anthropics/claude-plugins-official.git
         env:
           ANTHROPIC_VERTEX_PROJECT_ID: ${{ secrets.GCP_PROJECT }}
           CLOUD_ML_REGION: ${{ secrets.GCP_REGION }}
