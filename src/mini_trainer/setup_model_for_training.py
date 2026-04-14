@@ -68,9 +68,25 @@ def _apply_liger_kernels_if_requested(use_liger_kernels, model_config, base_mode
         ) from e
 
     model_type = getattr(model_config, "model_type", None)
+
+    # For VLM models that were extracted to their text backbone, the config
+    # may still carry the parent VLM model_type. Try the text_config's
+    # model_type as a fallback.
     apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(model_type)
     if apply_fn is None:
-        raise ValueError(f"Liger kernels do not support model type '{model_type}'.")
+        text_config = getattr(model_config, "text_config", None)
+        text_model_type = getattr(text_config, "model_type", None) if text_config else None
+        if text_model_type:
+            apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(text_model_type)
+            if apply_fn is not None:
+                model_type = text_model_type
+
+    if apply_fn is None:
+        log_rank_0(
+            f"⚠️  Liger kernels do not support model type '{model_type}' — "
+            f"skipping Liger optimization. Training will proceed without it."
+        )
+        return
 
     apply_signature = inspect.signature(apply_fn)
     liger_kwargs = {}
@@ -640,7 +656,9 @@ def align_model_and_tokenizer(model, tokenizer):
     return model
 
 
-def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_path: str) -> torch.dtype:
+def get_model_save_dtype(
+    save_dtype: str | torch.dtype | None, model_name_or_path: str, trust_remote_code: bool = False
+) -> torch.dtype:
     """
     Given an HF model reference and an optional user-provided save_dtype, returns the PyTorch data type that it should
     be saved in.
@@ -672,7 +690,7 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
     # FSDP2 requires us to load the model in FP32 to begin with for the
     # correct mixed-precision settings. So to circumvent this, we load the
     # original model's config separately
-    original_config = AutoConfig.from_pretrained(model_name_or_path)
+    original_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
     original_dtype = getattr(original_config, "torch_dtype", None) or getattr(original_config, "dtype", None)
 
     # HF models return a torch.dtype from this field, but docs mark it as an optional string
@@ -835,7 +853,8 @@ def setup_sft_model_distributed(
     buffer_dict = None
 
     # Check if this is a VLM wrapping a CausalLM text backbone, or a direct VLM
-    _model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    _trust_remote = base_model_args.get("trust_remote_code", False)
+    _model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=_trust_remote)
     is_vlm = is_vlm_with_causal_lm(_model_config)
     is_direct_vlm = is_vlm_for_direct_loading(_model_config)
 
@@ -854,6 +873,12 @@ def setup_sft_model_distributed(
                     cpu_model = ModelClass.from_pretrained(**base_model_args)
                 cpu_model = align_model_and_tokenizer(cpu_model, tokenizer)
                 config = cpu_model.config
+                # Preserve FP8 dequantization metadata on the config so it
+                # survives the broadcast to other ranks and model recreation.
+                if hasattr(cpu_model, "_fp8_scales"):
+                    config._fp8_scales = cpu_model._fp8_scales
+                if hasattr(cpu_model, "_fp8_quantization_config"):
+                    config._fp8_quantization_config = cpu_model._fp8_quantization_config
                 state_dict = cpu_model.state_dict()
                 buffer_dict = dict(cpu_model.named_buffers())  # Extract all buffers
         finally:
@@ -886,6 +911,13 @@ def setup_sft_model_distributed(
     # Align model with tokenizer
     model = align_model_and_tokenizer(model, tokenizer)
 
+    # Transfer FP8 metadata from config to the new model so checkpoint
+    # saving can re-quantize weights back to FP8.
+    if hasattr(config, "_fp8_scales"):
+        model._fp8_scales = config._fp8_scales
+    if hasattr(config, "_fp8_quantization_config"):
+        model._fp8_quantization_config = config._fp8_quantization_config
+
     # Store state dict and buffers for post-FSDP loading
     model._fsdp2_pending_state_dict = state_dict if dist.get_rank() == 0 else None
     model._fsdp2_pending_buffers = buffer_dict  # All ranks have buffer_dict
@@ -907,22 +939,24 @@ def setup_model(
     osft_rank_ratio: float | None = None,
     osft_target_patterns: list[str] | None = None,
     use_liger_kernels: bool = False,
+    trust_remote_code: bool = False,
 ) -> torch.nn.Module | OSFTModel:
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
         "torch_dtype": train_dtype,  # kept for internal OSFT code that reads this key
         "dtype": train_dtype,  # transformers v5 uses dtype for from_pretrained
+        "trust_remote_code": trust_remote_code,
     }
 
     # Get model config to check for GPT-OSS and set appropriate configurations
-    model_config = AutoConfig.from_pretrained(model_name_or_path)
+    model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
     is_gpt_oss = is_gpt_oss_model(model_config)
 
     # Pre-populate the transformers Hub kernel cache with locally installed
     # mamba_ssm and causal_conv1d packages. The Hub kernel versions may be
     # compiled against a different PyTorch/CUDA build, causing runtime errors.
     # Using local packages ensures ABI compatibility.
-    if getattr(model_config, "model_type", None) == "granitemoehybrid":
+    if getattr(model_config, "model_type", None) in ("granitemoehybrid", "nemotron_h"):
         try:
             import causal_conv1d
             import mamba_ssm
@@ -1001,7 +1035,7 @@ def setup_model(
         }
         log_rank_0(f"Model has timm vision tower — using eager attention for vision, {attn_impl} for text model.")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
 
     # patch both loss functions, since models will use the regular HF
     # cross-entropy functions when in eval mode
@@ -1136,7 +1170,7 @@ def setup_model(
     model = load_osft_model() if osft else load_standard_model()
 
     # here we handle configuring the save_dtype
-    _save_dtype = get_model_save_dtype(save_dtype, model_name_or_path)
+    _save_dtype = get_model_save_dtype(save_dtype, model_name_or_path, trust_remote_code)
     if not _save_dtype:
         raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
     # transformers v5 uses `dtype` instead of `torch_dtype`
