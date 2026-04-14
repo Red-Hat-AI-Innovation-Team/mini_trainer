@@ -575,52 +575,25 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
         log_rank_0("🔄 [Phase 3] Finalizing OSFT initialization")
 
         if context.resume_from_checkpoint:
-            # Resume path: materialize meta DTensors without SVD, then load from DCP.
-            log_rank_0("🔄 [OSFT] Resuming from checkpoint (skipping SVD)")
+            # Resume path: use normal SVD initialization to materialize meta
+            # tensors with correct FSDP2 tracking, then overwrite values from
+            # checkpoint. We MUST use SVD for materialization because replacing
+            # DTensor objects breaks FSDP2's FSDPParam references and mixed
+            # precision (reduce_dtype/param_dtype) tracking.
+            log_rank_0("🔄 [OSFT] Materializing via SVD, then loading checkpoint")
 
-            # The original HF state dict is not needed on resume — free it.
-            context.state_dict = None
-            gc.collect()
+            # Step 1: Normal materialization
+            log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
+            model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+            log_rank_0("   ✓ Non-OSFT parameters distributed")
 
-            # Step 1: Materialize all meta DTensors by replacing their local shards
-            # with zero-initialized tensors on the correct device. This preserves
-            # FSDP2's sharding metadata while moving params off meta device.
-            from torch.distributed._tensor import DTensor
+            log_rank_0("🔄 [OSFT] Computing SVD for materialization")
+            model.compute_distributed_svd(model, context.state_dict)
+            log_rank_0("   ✓ Parameters materialized")
 
-            # Use local CUDA device (not global rank, which breaks on multi-node)
-            device = torch.device("cuda", torch.cuda.current_device())
-            materialized = 0
-
-            def _materialize_dtensor(dt, device):
-                """Create a zero-filled DTensor preserving the original global shape."""
-                new_local = torch.zeros_like(dt._local_tensor, device=device)
-                # Preserve the original global shape (not local * world_size which may over-count
-                # due to FSDP2 padding the last shard).
-                return DTensor.from_local(
-                    new_local,
-                    device_mesh=dt.device_mesh,
-                    placements=dt.placements,
-                    run_check=False,
-                    shape=dt.shape,  # preserve global shape
-                    stride=dt.stride(),  # preserve global stride
-                )
-
-            for _, mod in model.named_modules():
-                for param_name, param in list(mod._parameters.items()):
-                    if param is not None and isinstance(param, DTensor) and param._local_tensor.is_meta:
-                        new_dt = _materialize_dtensor(param, device)
-                        mod._parameters[param_name] = torch.nn.Parameter(new_dt, requires_grad=param.requires_grad)
-                        materialized += 1
-                for buf_name, buf in list(mod._buffers.items()):
-                    if buf is not None and isinstance(buf, DTensor) and buf._local_tensor.is_meta:
-                        new_dt = _materialize_dtensor(buf, device)
-                        mod._buffers[buf_name] = new_dt
-                        materialized += 1
-            log_rank_0(f"   ✓ Materialized {materialized} meta DTensors")
-
-            # Step 2: Load checkpoint values via DCP in-place.
-            # Filter out keys not in the checkpoint (e.g., rotary embedding
-            # buffers like inv_freq that aren't saved but are recomputed).
+            # Step 2: Overwrite with checkpoint values via DCP in-place.
+            # model.state_dict() returns tensors sharing storage with the
+            # FSDP2-tracked parameters, so DCP writes go directly into them.
             log_rank_0("🔄 [OSFT] Loading checkpoint state via DCP")
             checkpoint_dir = Path(context.resume_from_checkpoint)
             dcp_dir = str(checkpoint_dir / "distributed")
@@ -631,63 +604,13 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
             ckpt_keys = {k[len("model.") :] for k in ckpt_metadata.state_dict_metadata if k.startswith("model.")}
 
             sd = model.state_dict()
-            # Only load keys that exist in both the model and the checkpoint
             missing_in_ckpt = set(sd.keys()) - ckpt_keys
             if missing_in_ckpt:
-                log_rank_0(
-                    f"   Skipping {len(missing_in_ckpt)} model keys not in checkpoint (e.g., {next(iter(missing_in_ckpt))})"
-                )
+                log_rank_0(f"   Skipping {len(missing_in_ckpt)} keys not in checkpoint")
                 sd = {k: v for k, v in sd.items() if k in ckpt_keys}
 
             dcp.load({"model": sd}, checkpoint_id=dcp_dir)
             log_rank_0("   ✓ Model state loaded from checkpoint")
-
-            # Step 3: Reconcile OSFT parameter dtypes after DCP load.
-            # The gradient projection in project_gradient_to_orthogonal_space()
-            # requires U_high/V_high to be in the same dtype as the gradients
-            # (which follow the FSDP2 param dtype). DCP may have saved them in
-            # a different dtype (e.g., bfloat16 output_dtype vs float32 param_dtype).
-            expected_dtype = getattr(model, "output_dtype", None) or getattr(model, "upcast_dtype", None)
-            if expected_dtype:
-                casted = 0
-                for _, mod in model.named_modules():
-                    for buf_name, buf in list(mod._buffers.items()):
-                        if buf is not None and "osft_" in buf_name and buf.dtype != expected_dtype:
-                            if isinstance(buf, DTensor):
-                                new_local = buf._local_tensor.to(expected_dtype)
-                                mod._buffers[buf_name] = DTensor.from_local(
-                                    new_local,
-                                    device_mesh=buf.device_mesh,
-                                    placements=buf.placements,
-                                    run_check=False,
-                                    shape=buf.shape,
-                                    stride=buf.stride(),
-                                )
-                            else:
-                                mod._buffers[buf_name] = buf.to(expected_dtype)
-                            casted += 1
-                    for param_name, param in list(mod._parameters.items()):
-                        if param is not None and "osft_" in param_name and param.dtype != expected_dtype:
-                            if isinstance(param, DTensor):
-                                new_local = param._local_tensor.to(expected_dtype)
-                                new_dt = DTensor.from_local(
-                                    new_local,
-                                    device_mesh=param.device_mesh,
-                                    placements=param.placements,
-                                    run_check=False,
-                                    shape=param.shape,
-                                    stride=param.stride(),
-                                )
-                                mod._parameters[param_name] = torch.nn.Parameter(
-                                    new_dt, requires_grad=param.requires_grad
-                                )
-                            else:
-                                mod._parameters[param_name] = torch.nn.Parameter(
-                                    param.data.to(expected_dtype), requires_grad=param.requires_grad
-                                )
-                            casted += 1
-                if casted:
-                    log_rank_0(f"   Casted {casted} OSFT tensors to {expected_dtype}")
         else:
             # Normal path: compute distributed SVD
             # Step 1: Synchronize non-OSFT parameters across ranks
