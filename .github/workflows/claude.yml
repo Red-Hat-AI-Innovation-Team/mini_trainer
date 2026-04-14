@@ -38,7 +38,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           use_vertex: true
-          claude_args: "--effort max"
+          claude_args: "--model claude-opus-4-6[1m] --effort max"
         env:
           ANTHROPIC_VERTEX_PROJECT_ID: ${{ secrets.GCP_PROJECT }}
           CLOUD_ML_REGION: ${{ secrets.GCP_REGION }}
