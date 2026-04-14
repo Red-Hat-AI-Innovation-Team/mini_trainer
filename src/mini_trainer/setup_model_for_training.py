@@ -641,6 +641,53 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
 
             dcp.load({"model": sd}, checkpoint_id=dcp_dir)
             log_rank_0("   ✓ Model state loaded from checkpoint")
+
+            # Step 3: Reconcile OSFT parameter dtypes after DCP load.
+            # The gradient projection in project_gradient_to_orthogonal_space()
+            # requires U_high/V_high to be in the same dtype as the gradients
+            # (which follow the FSDP2 param dtype). DCP may have saved them in
+            # a different dtype (e.g., bfloat16 output_dtype vs float32 param_dtype).
+            expected_dtype = getattr(model, "output_dtype", None) or getattr(model, "upcast_dtype", None)
+            if expected_dtype:
+                casted = 0
+                for _, mod in model.named_modules():
+                    for buf_name, buf in list(mod._buffers.items()):
+                        if buf is not None and "osft_" in buf_name and buf.dtype != expected_dtype:
+                            if isinstance(buf, DTensor):
+                                new_local = buf._local_tensor.to(expected_dtype)
+                                mod._buffers[buf_name] = DTensor.from_local(
+                                    new_local,
+                                    device_mesh=buf.device_mesh,
+                                    placements=buf.placements,
+                                    run_check=False,
+                                    shape=buf.shape,
+                                    stride=buf.stride(),
+                                )
+                            else:
+                                mod._buffers[buf_name] = buf.to(expected_dtype)
+                            casted += 1
+                    for param_name, param in list(mod._parameters.items()):
+                        if param is not None and "osft_" in param_name and param.dtype != expected_dtype:
+                            if isinstance(param, DTensor):
+                                new_local = param._local_tensor.to(expected_dtype)
+                                new_dt = DTensor.from_local(
+                                    new_local,
+                                    device_mesh=param.device_mesh,
+                                    placements=param.placements,
+                                    run_check=False,
+                                    shape=param.shape,
+                                    stride=param.stride(),
+                                )
+                                mod._parameters[param_name] = torch.nn.Parameter(
+                                    new_dt, requires_grad=param.requires_grad
+                                )
+                            else:
+                                mod._parameters[param_name] = torch.nn.Parameter(
+                                    param.data.to(expected_dtype), requires_grad=param.requires_grad
+                                )
+                            casted += 1
+                if casted:
+                    log_rank_0(f"   Casted {casted} OSFT tensors to {expected_dtype}")
         else:
             # Normal path: compute distributed SVD
             # Step 1: Synchronize non-OSFT parameters across ranks
