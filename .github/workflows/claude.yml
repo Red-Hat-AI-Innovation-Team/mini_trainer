@@ -68,7 +68,7 @@ jobs:
         uses: anthropics/claude-code-action@1c8b699d43e9bfed42b48ef15da85d89bab70960 # v1
         with:
           use_vertex: true
-          claude_args: "--model claude-opus-4-6[1m] --effort max"
+          claude_args: "--model claude-opus-4-6[1m] --effort max --dangerously-skip-permissions"
           plugins: |
             code-review@claude-plugins-official
             commit-commands@claude-plugins-official
