@@ -53,24 +53,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Debug git state
+      - name: Pre-fetch fork PR branch
+        if: github.event.issue.pull_request
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "=== Remotes ==="
-          git remote -v
-          echo "=== Branches ==="
-          git branch -a
-          echo "=== PR refs ==="
-          git ls-remote origin 'refs/pull/74/*' || true
-          echo "=== Event info ==="
-          echo "event_name: ${{ github.event_name }}"
-          echo "is_pr: ${{ github.event.issue.pull_request && 'true' || 'false' }}"
-          echo "issue_number: ${{ github.event.issue.number }}"
-          echo "=== Git config ==="
-          git config --get-all remote.origin.url
-          echo "=== All refs ==="
-          git show-ref | head -30
+          PR_NUMBER=${{ github.event.issue.number }}
+          HEAD_REF=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.ref')
+          HEAD_REPO=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.repo.full_name')
+          if [ "$HEAD_REPO" != "${{ github.repository }}" ]; then
+            echo "Fork PR detected: $HEAD_REPO/$HEAD_REF"
+            git fetch origin "pull/$PR_NUMBER/head:$HEAD_REF"
+            git fetch origin "pull/$PR_NUMBER/head:refs/remotes/origin/$HEAD_REF"
+          fi
 
       - name: Load shared skills
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
