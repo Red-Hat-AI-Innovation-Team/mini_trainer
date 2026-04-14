@@ -52,16 +52,17 @@ def validate_training_state(
         expected_param_dtype: Expected dtype for model parameters and gradients
         expected_optimizer_dtype: Expected dtype for optimizer state (usually float32 for numerical stability)
     """
+    # FSDP2 MixedPrecisionPolicy may store params in fp32; allow this as valid
+    allowed_param_dtypes = {expected_param_dtype, torch.float32}
     for name, param in model.named_parameters():
-        # FSDP2 MixedPrecisionPolicy stores params in original dtype (often fp32)
-        # and casts to param_dtype during forward/backward. Allow fp32 storage
-        # when training in lower precision.
-        if param.requires_grad and param.dtype != expected_param_dtype:
-            if param.dtype != torch.float32:
-                raise ValueError(f"Parameter {name} is not in {expected_param_dtype}, got {param.dtype}")
-        if param.grad is not None and param.grad.dtype != expected_param_dtype:
-            if param.grad.dtype != torch.float32:
-                raise ValueError(f"Gradient {name} is not in {expected_param_dtype}, got {param.grad.dtype}")
+        if param.requires_grad and param.dtype not in allowed_param_dtypes:
+            raise ValueError(
+                f"Parameter {name} has unexpected dtype {param.dtype}, expected one of {allowed_param_dtypes}"
+            )
+        if param.grad is not None and param.grad.dtype not in allowed_param_dtypes:
+            raise ValueError(
+                f"Gradient {name} has unexpected dtype {param.grad.dtype}, expected one of {allowed_param_dtypes}"
+            )
 
     # Check optimizer state tensors - only for trainable parameters
     for p_obj, state in optimizer.state.items():

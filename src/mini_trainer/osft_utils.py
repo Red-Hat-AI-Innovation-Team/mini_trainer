@@ -537,11 +537,11 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip
     (I - U_high @ U_high^T) dU that removes the col(U_high) component
     (cf. Edelman, Arias & Smith 1998, arXiv:physics/9806030, §2.5.1).
 
-    V projection must use the Gram-matrix form
-    dV -= dV @ (V_high^T @ V_high)  because FSDP2 shards V_high on dim-0
-    (the singular-vector dimension), making the factored form
-    dV -= (dV @ V_high^T) @ V_high  produce column-blocks rather than
-    partial sums — requiring an all-gather instead of an all-reduce.
+    V projection uses the factored form  dV -= (dV @ V_high^T) @ V_high
+    with a small (rank_low, rank_high) intermediate.  When FSDP2 shards
+    V_high on dim-0, `dV @ V_high^T` produces partial sums that are
+    correctly aggregated via all-reduce, then multiplied by local V_high
+    rows to complete the projection.
 
     Args:
         svd_dict: Dictionary containing the SVD decomposition components.
@@ -2146,30 +2146,23 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     v_flat_parts.append(dV_Vt.flatten())
 
             if v_flat_parts:
-                if is_distributed:
-                    batched_v = torch.cat(v_flat_parts)
-                    dist.all_reduce(batched_v, op=dist.ReduceOp.SUM)
+                batched_v = torch.cat(v_flat_parts)
+                dist.all_reduce(batched_v, op=dist.ReduceOp.SUM)
 
-                    offset = 0
-                    for local_V_high, local_dV, dV, coeff_shape in v_work:
-                        numel = coeff_shape[0] * coeff_shape[1]
-                        dV_Vt = batched_v[offset:offset + numel].reshape(coeff_shape)
-                        offset += numel
+                offset = 0
+                for local_V_high, local_dV, dV, coeff_shape in v_work:
+                    numel = coeff_shape[0] * coeff_shape[1]
+                    dV_Vt = batched_v[offset : offset + numel].reshape(coeff_shape)
+                    offset += numel
 
-                        local_dV.addmm_(dV_Vt, local_V_high, alpha=-1.0)
+                    local_dV.addmm_(dV_Vt, local_V_high, alpha=-1.0)
 
-                        if hasattr(dV, "_local_tensor"):
-                            dV._local_tensor.copy_(local_dV)
-                        else:
-                            dV.copy_(local_dV)
-
-                    assert offset == batched_v.numel()
-                else:
-                    # Non-distributed: apply directly (no all-reduce needed)
-                    for local_V_high, local_dV, dV, coeff_shape in v_work:
-                        dV_Vt = v_flat_parts.pop(0).reshape(coeff_shape)
-                        local_dV.addmm_(dV_Vt, local_V_high, alpha=-1.0)
+                    if hasattr(dV, "_local_tensor"):
+                        dV._local_tensor.copy_(local_dV)
+                    else:
                         dV.copy_(local_dV)
+
+                assert offset == batched_v.numel()
 
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""
