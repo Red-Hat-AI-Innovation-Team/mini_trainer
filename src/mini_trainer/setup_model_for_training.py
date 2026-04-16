@@ -1015,6 +1015,15 @@ def setup_model(
         except (ImportError, AttributeError) as e:
             log_rank_0(f"Could not patch mamba kernels ({e}); GraniteMoeHybrid may use Hub kernels")
 
+    # Compatibility shim for Nemotron's remote code which imports a
+    # function that was renamed in transformers 5.x. Without this,
+    # trust_remote_code=True fails with ImportError.
+    if getattr(model_config, "model_type", None) == "nemotron_h":
+        from transformers.utils import import_utils as _iu
+
+        if not hasattr(_iu, "is_flash_attn_greater_or_equal_2_10"):
+            _iu.is_flash_attn_greater_or_equal_2_10 = lambda: _iu.is_flash_attn_greater_or_equal("2.10")
+
     # Set up quantization config for GPT-OSS models
     if is_gpt_oss:
         try:
