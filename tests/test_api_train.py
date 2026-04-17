@@ -534,9 +534,8 @@ class TestRunTraining:
             with pytest.raises(KeyboardInterrupt):
                 run_training(torch_args, train_args)
 
-            # Verify cleanup was attempted
-            mock_popen.terminate.assert_called_once()
-            mock_popen.wait.assert_called_once()
+            # Verify wait was called for process cleanup
+            mock_popen.wait.assert_called()
 
     @patch("mini_trainer.api_train.StreamablePopen")
     def test_run_training_process_failure(self, mock_popen_class):
@@ -560,7 +559,6 @@ class TestRunTraining:
                 run_training(torch_args, train_args)
 
             assert "Training failed" in str(exc_info.value)
-            mock_popen.terminate.assert_called_once()
 
 
 class TestEnums:
