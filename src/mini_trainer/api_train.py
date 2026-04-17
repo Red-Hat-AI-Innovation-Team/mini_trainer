@@ -216,6 +216,21 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
     logger.info("Running training command as subprocess: %s", " ".join(command))
 
+    # Install parent-side signal handler for on-demand checkpointing.
+    # When a signal arrives, we write the trigger file and give workers
+    # generous time to save a checkpoint before proceeding with shutdown.
+    signal_handler = None
+    if train_args.on_demand_checkpointing:
+        from mini_trainer.full_state_checkpoint import FullStateCheckpointer
+
+        signal_handler = FullStateCheckpointer(
+            checkpoint_dir=str(output_path / "full_state_checkpoints"),
+            rank=0,
+            world_size=1,
+        )
+        signal_handler.install_signal_handlers()
+        logger.info("On-demand checkpointing: parent signal handlers installed")
+
     # Run the training process
     log_file = output_path / f"training_log_node{torch_args.node_rank}.log"
     process = None
@@ -235,21 +250,48 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         interrupt = e
     finally:
         if process is None:
+            if signal_handler is not None:
+                signal_handler.cleanup()
             return
 
-        failure = process.poll() != 0
-        if not failure:
-            logger.info("Training completed successfully! 🎉")
-        else:
-            logger.error("Training subprocess failed. Check logs for details.")
+        # If on-demand checkpointing caught a signal, give workers time
+        # to detect the trigger and save before we send our own signals.
+        if signal_handler is not None and signal_handler._trigger_path.exists():
+            logger.info(
+                "On-demand checkpoint: signal received. Waiting up to 300s "
+                "for workers to save checkpoint before shutdown..."
+            )
+            try:
+                process.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                logger.warning("On-demand checkpoint: workers did not finish within 300s. Proceeding with shutdown.")
 
-        process.terminate()
+        # Check final exit status
         try:
-            logger.info("Waiting for process to exit (60s timeout)...")
             process.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            logger.error("Training subprocess did not terminate, sending SIGKILL.")
-            process.kill()
+            pass
+        process_code = process.poll()
+
+        if process_code is not None and process_code == 0:
+            logger.info("Training completed successfully! 🎉")
+        elif process_code is None:
+            logger.error("Training subprocess has not exited. Sending SIGTERM.")
+            process.terminate()
+            try:
+                process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                logger.error("Training subprocess did not terminate, sending SIGKILL.")
+                process.kill()
+        else:
+            logger.error("Training subprocess exited with code %d.", process_code)
+
+        # Recompute after any forced shutdown
+        process_code = process.poll()
+        failure = process_code is None or process_code != 0
+
+        if signal_handler is not None:
+            signal_handler.cleanup()
 
         if interrupt:
             raise interrupt

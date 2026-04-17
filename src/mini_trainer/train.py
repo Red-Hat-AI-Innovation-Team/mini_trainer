@@ -873,7 +873,13 @@ def train(
             batch_start_time = time.time()
             batch_totals.reset_batch()
             torch.cuda.reset_peak_memory_stats()
+            _interrupted = False
             for grad_accum, mb in enumerate(batch):
+                # Check for on-demand checkpoint before forward pass
+                if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                    _interrupted = True
+                    break
+
                 mb_start_time = time.time()
                 mb_num_loss_counted_tokens = mb["num_loss_counted_tokens"]
                 mb_num_samples = mb["num_samples"]
@@ -898,6 +904,11 @@ def train(
                     # MoE-style models will have an aux loss which we want to compute
                     loss += output.aux_loss.float().sum()
 
+                # Check for on-demand checkpoint before backward pass
+                if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                    _interrupted = True
+                    break
+
                 # Ensure scalar loss even if model returns per-token loss
                 loss = (loss / batch_num_loss_counted_tokens) * world_size
                 loss_metrics = loss.detach().cpu().item()
@@ -914,6 +925,43 @@ def train(
                     loss_backward=loss.detach().item() / world_size,
                     time_per_minibatch=time.time() - mb_start_time,
                 )
+
+                # Check for on-demand checkpoint after backward pass
+                if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                    _interrupted = True
+                    break
+
+            # If interrupted during minibatch processing, save checkpoint
+            # using the pre-step RNG snapshot and exit. The partial gradients
+            # are discarded — resume will replay the full step.
+            if _interrupted:
+                log_rank_0("Signal received during minibatch — saving checkpoint and exiting")
+                full_state_checkpointer.save(
+                    model=model,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    training_state={
+                        "step": step,
+                        "epoch": epoch,
+                        "total_samples_accumulated": total_samples_accumulated,
+                        "total_tokens_processed": total_tokens_processed,
+                        "last_validation_loss": last_validation_loss,
+                    },
+                    checkpointer_state={
+                        "last_saved_samples": checkpointer.last_saved_samples,
+                        "last_frequency_saved_samples": checkpointer.last_frequency_saved_samples,
+                        "best_val_loss": checkpointer.best_val_loss,
+                    },
+                    data_loader=data_loader,
+                    device=device,
+                    rng_snapshot=_rng_snapshot,
+                )
+                full_state_checkpointer.cleanup()
+                log_rank_0("Full-state checkpoint saved. Exiting.")
+                dist.barrier()
+                dist.destroy_process_group()
+                os._exit(0)
+
             step += 1
             # sum the metrics from all processes
             batch_totals.reduce_batch_metrics(device)
