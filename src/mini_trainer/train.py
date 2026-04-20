@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+import random
 import sys
 import time
 from pathlib import Path
 from typing import Annotated, Literal
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTensor is available
@@ -15,6 +17,7 @@ from typer import Option, Typer
 from mini_trainer import mlflow_wrapper, wandb_wrapper
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer.batch_metrics import BatchMetrics
+from mini_trainer.full_state_checkpoint import FullStateCheckpointer
 from mini_trainer.sampler import get_data_loader
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.training_types import PretrainingConfig, TrainingMode
@@ -680,6 +683,8 @@ def train(
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
     trust_remote_code: bool = False,
+    on_demand_checkpointing: bool = False,
+    resume_from_full_state_checkpoint: str | None = None,
 ):
     """
     Runs the model training loop.
@@ -755,9 +760,79 @@ def train(
         checkpoint_at_final=save_final_checkpoint,
     )
 
+    # Initialize on-demand full-state checkpointing if enabled
+    full_state_checkpointer = None
+    if on_demand_checkpointing:
+        full_state_checkpointer = FullStateCheckpointer(
+            checkpoint_dir=os.path.join(output_dir, "full_state_checkpoints"),
+            rank=dist.get_rank(),
+            world_size=world_size,
+        )
+        full_state_checkpointer.install_signal_handlers()
+        log_rank_0("On-demand full-state checkpointing enabled")
+
+        # Warn if model uses quantization — checkpoint/resume may not
+        # preserve quantization state correctly.
+        inner = getattr(model, "module", model)
+        if hasattr(inner, "_fp8_scales") or hasattr(getattr(inner, "config", None), "_fp8_scales"):
+            log_rank_0(
+                "WARNING: Model uses FP8 quantization. On-demand checkpointing "
+                "may not correctly preserve quantization scales on resume. "
+                "Verify checkpoint fidelity before relying on this in production."
+            )
+
     device = next(model.parameters()).device
     epoch = 0
     last_validation_loss = None  # Track the most recent validation loss
+
+    # Restore training state from full-state checkpoint if resuming
+    if resume_from_full_state_checkpoint:
+        log_rank_0(f"Resuming from full-state checkpoint: {resume_from_full_state_checkpoint}")
+        meta = FullStateCheckpointer.load_metadata(resume_from_full_state_checkpoint)
+
+        # Restore training counters
+        step = meta["step"]
+        epoch = meta["epoch"]
+        total_samples_accumulated = meta["total_samples_accumulated"]
+        total_tokens_processed = meta["total_tokens_processed"]
+        last_validation_loss = meta.get("last_validation_loss")
+
+        # Restore checkpointer state
+        cs = meta["checkpointer_state"]
+        checkpointer.last_saved_samples = cs["last_saved_samples"]
+        checkpointer.last_frequency_saved_samples = cs["last_frequency_saved_samples"]
+        checkpointer.best_val_loss = cs["best_val_loss"]
+
+        # Restore LR scheduler
+        lr_scheduler.load_state_dict(meta["lr_scheduler_state"])
+
+        # Restore sampler epoch
+        data_loader.sampler.set_epoch(meta["sampler_epoch"])
+
+        # Restore per-rank RNG states
+        FullStateCheckpointer.load_rng_states(resume_from_full_state_checkpoint, rank=dist.get_rank())
+
+        # Load optimizer state (model state was loaded in finalize_model_initialization).
+        # We need to pre-populate optimizer state entries (exp_avg, exp_avg_sq, step)
+        # before loading, because the checkpoint was saved with DTensor shards that
+        # need matching DTensor structure in the optimizer.
+        log_rank_0("Loading optimizer state...")
+        for group in optimizer.param_groups:
+            for p in group["params"]:
+                if p not in optimizer.state:
+                    optimizer.state[p] = {
+                        "step": torch.tensor(0.0),
+                        "exp_avg": torch.zeros_like(p),
+                        "exp_avg_sq": torch.zeros_like(p),
+                    }
+        FullStateCheckpointer.load_optimizer_state(resume_from_full_state_checkpoint, optimizer, rank=dist.get_rank())
+        log_rank_0("   ✓ Optimizer state loaded")
+
+        log_rank_0(f"Resumed at step={step}, epoch={epoch}, samples={total_samples_accumulated}")
+
+    # Track steps for batch-skipping when resuming mid-epoch.
+    # We skip by step count (not sample count) to stay consistent across ranks.
+    _resume_target_step = step if resume_from_full_state_checkpoint else None
 
     # main training loop
     while not reached_stop_condition(
@@ -773,11 +848,38 @@ def train(
         data_loader.sampler.set_epoch(epoch)
         data_loader_it = iter(data_loader)
 
+        _skipped_steps = 0
         for batch in data_loader_it:
+            # Skip already-processed batches when resuming mid-epoch
+            if _resume_target_step is not None:
+                _skipped_steps += 1
+                if _skipped_steps <= _resume_target_step:
+                    continue
+                # Done skipping — clear the resume state
+                log_rank_0(f"Skipped {_resume_target_step} batches to resume position")
+                _resume_target_step = None
+
+            # Snapshot RNG state at the start of this training step, BEFORE
+            # any gradient accumulation. If we checkpoint mid-step, we save
+            # this snapshot so resume replays the step from the beginning.
+            _rng_snapshot = {
+                "torch_rng": torch.get_rng_state(),
+                "python_rng": random.getstate(),
+                "numpy_rng": np.random.get_state(),
+            }
+            if torch.cuda.is_available() and torch.cuda.is_initialized():
+                _rng_snapshot["cuda_rng"] = torch.cuda.get_rng_state()
+
             batch_start_time = time.time()
             batch_totals.reset_batch()
             torch.cuda.reset_peak_memory_stats()
+            _interrupted = False
             for grad_accum, mb in enumerate(batch):
+                # Check for on-demand checkpoint before forward pass
+                if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                    _interrupted = True
+                    break
+
                 mb_start_time = time.time()
                 mb_num_loss_counted_tokens = mb["num_loss_counted_tokens"]
                 mb_num_samples = mb["num_samples"]
@@ -802,6 +904,11 @@ def train(
                     # MoE-style models will have an aux loss which we want to compute
                     loss += output.aux_loss.float().sum()
 
+                # Check for on-demand checkpoint before backward pass
+                if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                    _interrupted = True
+                    break
+
                 # Ensure scalar loss even if model returns per-token loss
                 loss = (loss / batch_num_loss_counted_tokens) * world_size
                 loss_metrics = loss.detach().cpu().item()
@@ -818,6 +925,43 @@ def train(
                     loss_backward=loss.detach().item() / world_size,
                     time_per_minibatch=time.time() - mb_start_time,
                 )
+
+                # Check for on-demand checkpoint after backward pass
+                if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                    _interrupted = True
+                    break
+
+            # If interrupted during minibatch processing, save checkpoint
+            # using the pre-step RNG snapshot and exit. The partial gradients
+            # are discarded — resume will replay the full step.
+            if _interrupted:
+                log_rank_0("Signal received during minibatch — saving checkpoint and exiting")
+                full_state_checkpointer.save(
+                    model=model,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    training_state={
+                        "step": step,
+                        "epoch": epoch,
+                        "total_samples_accumulated": total_samples_accumulated,
+                        "total_tokens_processed": total_tokens_processed,
+                        "last_validation_loss": last_validation_loss,
+                    },
+                    checkpointer_state={
+                        "last_saved_samples": checkpointer.last_saved_samples,
+                        "last_frequency_saved_samples": checkpointer.last_frequency_saved_samples,
+                        "best_val_loss": checkpointer.best_val_loss,
+                    },
+                    data_loader=data_loader,
+                    device=device,
+                    rng_snapshot=_rng_snapshot,
+                )
+                full_state_checkpointer.cleanup()
+                log_rank_0("Full-state checkpoint saved. Exiting.")
+                dist.barrier()
+                dist.destroy_process_group()
+                os._exit(0)
+
             step += 1
             # sum the metrics from all processes
             batch_totals.reduce_batch_metrics(device)
@@ -871,6 +1015,35 @@ def train(
                 metric_logger.log_sync(batch_metrics)
 
             dist.barrier()
+
+            # On-demand full-state checkpoint check
+            if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
+                log_rank_0("Signal received — saving full-state checkpoint and exiting")
+                full_state_checkpointer.save(
+                    model=model,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    training_state={
+                        "step": step,
+                        "epoch": epoch,
+                        "total_samples_accumulated": total_samples_accumulated,
+                        "total_tokens_processed": total_tokens_processed,
+                        "last_validation_loss": last_validation_loss,
+                    },
+                    checkpointer_state={
+                        "last_saved_samples": checkpointer.last_saved_samples,
+                        "last_frequency_saved_samples": checkpointer.last_frequency_saved_samples,
+                        "best_val_loss": checkpointer.best_val_loss,
+                    },
+                    data_loader=data_loader,
+                    device=device,
+                    rng_snapshot=_rng_snapshot,
+                )
+                full_state_checkpointer.cleanup()
+                log_rank_0("Full-state checkpoint saved. Exiting.")
+                dist.barrier()
+                dist.destroy_process_group()
+                os._exit(0)
 
             # sample-based saving, keep in the inner loop
             if checkpointer.should_save_checkpoint(
@@ -1104,6 +1277,15 @@ def main(
             )
         ),
     ] = False,
+    # On-demand full-state checkpointing
+    on_demand_checkpointing: Annotated[
+        bool,
+        Option(help="Enable signal-driven full-state checkpointing for training resumption"),
+    ] = False,
+    resume_from_full_state_checkpoint: Annotated[
+        str | None,
+        Option(help="Path to a full-state checkpoint directory to resume training from"),
+    ] = None,
     # pretraining parameters
     block_size: Annotated[
         int | None,
@@ -1262,6 +1444,36 @@ def main(
         trust_remote_code=trust_remote_code,
     )
 
+    # When resuming, ensure model architecture matches the checkpoint.
+    # The first training run may have resized embeddings (e.g., vocab alignment),
+    # creating a new base model f'. Resume must load f', not re-derive from f.
+    if resume_from_full_state_checkpoint:
+        # Ensure the model's architecture matches the checkpoint (f' not f).
+        # The first training run may have resized embeddings, creating f'.
+        # We read the checkpoint's DCP metadata to get the actual saved embedding
+        # shape and resize if needed so f'' == f'.
+        from torch.distributed.checkpoint import FileSystemReader
+
+        dcp_dir = os.path.join(resume_from_full_state_checkpoint, "distributed")
+        if os.path.isdir(dcp_dir):
+            reader = FileSystemReader(dcp_dir)
+            dcp_meta = reader.read_metadata()
+            for fqn, tensor_meta in dcp_meta.state_dict_metadata.items():
+                if "embed_tokens.weight" in fqn and hasattr(tensor_meta, "size"):
+                    ckpt_embed_size = tensor_meta.size[0]
+                    inner = model
+                    for attr in ["model", "embed_tokens"]:
+                        inner = getattr(inner, attr, inner)
+                    if hasattr(inner, "weight"):
+                        current_size = inner.weight.shape[0]
+                        if current_size != ckpt_embed_size:
+                            log_rank_0(
+                                f"Resizing model embeddings from {current_size} to {ckpt_embed_size} "
+                                f"to match checkpoint (f' architecture)"
+                            )
+                            model.resize_token_embeddings(ckpt_embed_size)
+                    break
+
     # Create PretrainingConfig if block_size is provided
     pretraining_config = None
     if block_size is not None:
@@ -1310,6 +1522,7 @@ def main(
         beta2=beta2,
         eps=eps,
         weight_decay=weight_decay,
+        resume_from_checkpoint=resume_from_full_state_checkpoint,
     )
 
     train(
@@ -1334,6 +1547,8 @@ def main(
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
         trust_remote_code=trust_remote_code,
+        on_demand_checkpointing=on_demand_checkpointing,
+        resume_from_full_state_checkpoint=resume_from_full_state_checkpoint,
     )
 
     # once done, tear down distributed environment

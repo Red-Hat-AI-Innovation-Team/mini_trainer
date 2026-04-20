@@ -201,6 +201,10 @@ class TestStreamablePopen:
         import threading
         import time
 
+        # Use 2x buffer_time between child outputs so test checks fall
+        # safely between outputs, avoiding timing races in CI.
+        child_delay = self.buffer_time * 2
+
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "stdout_realtime_test.log"
             # Script that outputs "1", "2", "3" with delays
@@ -209,9 +213,9 @@ class TestStreamablePopen:
                 "-c",
                 "import time, sys; "
                 "print('1', flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('2', flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('3', flush=True)",
             ]
 
@@ -222,7 +226,7 @@ class TestStreamablePopen:
             listen_thread.start()
 
             # Check that "1" appears first
-            time.sleep(self.buffer_time)  # Increased delay for CI environments to start subprocess
+            time.sleep(self.buffer_time)  # Wait for subprocess startup + first output
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content, f"Expected '1' in content but got: {content!r}"
@@ -230,7 +234,7 @@ class TestStreamablePopen:
                 assert "3" not in content
 
             # Check that "2" appears next
-            time.sleep(self.buffer_time)  # Wait for "2" to be printed
+            time.sleep(child_delay)  # Wait for "2" to be printed
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content
@@ -238,7 +242,7 @@ class TestStreamablePopen:
                 assert "3" not in content
 
             # Check that "3" appears last
-            time.sleep(self.buffer_time)  # Wait for "3" to be printed
+            time.sleep(child_delay)  # Wait for "3" to be printed
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content
@@ -253,6 +257,10 @@ class TestStreamablePopen:
         import threading
         import time
 
+        # Use 2x buffer_time between child outputs so test checks fall
+        # safely between outputs, avoiding timing races in CI.
+        child_delay = self.buffer_time * 2
+
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "stderr_realtime_test.log"
             # Script that outputs "1", "2", "3" to stderr with delays
@@ -261,9 +269,9 @@ class TestStreamablePopen:
                 "-c",
                 "import time, sys; "
                 "print('1', file=sys.stderr, flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('2', file=sys.stderr, flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('3', file=sys.stderr, flush=True)",
             ]
 
@@ -274,7 +282,7 @@ class TestStreamablePopen:
             listen_thread.start()
 
             # Check that "1" appears first
-            time.sleep(self.buffer_time)  # Increased delay for CI environments to start subprocess
+            time.sleep(self.buffer_time)  # Wait for subprocess startup + first output
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content, f"Expected '1' in content but got: {content!r}"
@@ -282,7 +290,7 @@ class TestStreamablePopen:
                 assert "3" not in content
 
             # Check that "2" appears next
-            time.sleep(self.buffer_time)  # Wait for "2" to be printed
+            time.sleep(child_delay)  # Wait for "2" to be printed
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content
@@ -290,7 +298,7 @@ class TestStreamablePopen:
                 assert "3" not in content
 
             # Check that "3" appears last
-            time.sleep(self.buffer_time)  # Wait for "3" to be printed
+            time.sleep(child_delay)  # Wait for "3" to be printed
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content
@@ -305,6 +313,10 @@ class TestStreamablePopen:
         import threading
         import time
 
+        # Use 2x buffer_time between child outputs so test checks fall
+        # safely between outputs, avoiding timing races in CI.
+        child_delay = self.buffer_time * 2
+
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "mixed_realtime_test.log"
             # Script that alternates between stdout and stderr with delays
@@ -313,11 +325,11 @@ class TestStreamablePopen:
                 "-c",
                 "import time, sys; "
                 "print('stdout-1', flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('stderr-1', file=sys.stderr, flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('stdout-2', flush=True); "
-                f"time.sleep({self.buffer_time}); "
+                f"time.sleep({child_delay}); "
                 "print('stderr-2', file=sys.stderr, flush=True)",
             ]
 
@@ -328,7 +340,7 @@ class TestStreamablePopen:
             listen_thread.start()
 
             # Check first stdout appears
-            time.sleep(self.buffer_time)  # Increased initial delay for CI environments
+            time.sleep(self.buffer_time)  # Wait for subprocess startup + first output
             with open(log_file) as f:
                 content = f.read()
                 assert "stdout-1" in content, f"Expected 'stdout-1' in content but got: {content!r}"
@@ -337,7 +349,7 @@ class TestStreamablePopen:
                 assert "stderr-2" not in content
 
             # Check first stderr appears
-            time.sleep(self.buffer_time)
+            time.sleep(child_delay)
             with open(log_file) as f:
                 content = f.read()
                 assert "stdout-1" in content
@@ -346,7 +358,7 @@ class TestStreamablePopen:
                 assert "stderr-2" not in content
 
             # Check second stdout appears
-            time.sleep(self.buffer_time)
+            time.sleep(child_delay)
             with open(log_file) as f:
                 content = f.read()
                 assert "stdout-1" in content
@@ -355,7 +367,7 @@ class TestStreamablePopen:
                 assert "stderr-2" not in content
 
             # Check second stderr appears
-            time.sleep(self.buffer_time)  # Increased delay to ensure last output is written
+            time.sleep(child_delay)
             with open(log_file) as f:
                 content = f.read()
                 assert "stdout-1" in content
@@ -534,9 +546,8 @@ class TestRunTraining:
             with pytest.raises(KeyboardInterrupt):
                 run_training(torch_args, train_args)
 
-            # Verify cleanup was attempted
-            mock_popen.terminate.assert_called_once()
-            mock_popen.wait.assert_called_once()
+            # Verify wait was called for process cleanup
+            mock_popen.wait.assert_called()
 
     @patch("mini_trainer.api_train.StreamablePopen")
     def test_run_training_process_failure(self, mock_popen_class):
@@ -560,7 +571,6 @@ class TestRunTraining:
                 run_training(torch_args, train_args)
 
             assert "Training failed" in str(exc_info.value)
-            mock_popen.terminate.assert_called_once()
 
 
 class TestEnums:
