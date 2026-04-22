@@ -1,4 +1,5 @@
 import gc
+import math
 import os
 import types
 import typing as t
@@ -23,6 +24,20 @@ from mini_trainer.vlm_utils import extract_causal_lm_from_vlm, is_vlm_with_causa
 OSFT_CACHE_CLEAR_INTERVAL = int(
     os.getenv("OSFT_CACHE_CLEAR_INTERVAL", 5)
 )  # Clear GPU cache every N parameters during matrix reconstruction
+
+# Opt-in: cache the all-gathered (full) V_high to avoid repeating the
+# all-gather on every step.  V_high is frozen (requires_grad=False), so the
+# cache is exact.
+#
+# V projection uses the factored form: dV -= (dV @ V_high^T) @ V_high.
+# Under FSDP2, V_high is dim-0 sharded, so the factored form requires an
+# all-gather of V_high (k_high x M).  Caching stores the all-gathered result.
+#
+# Default OFF because the cache is REPLICATED on every FSDP2 rank (not
+# sharded), adding ~5.1 GB per rank for Llama-8B (all 224 targets in bf16).
+# For Llama-70B+ the cache exceeds GPU memory.  Set to "1" only after
+# confirming sufficient memory headroom.
+OSFT_CACHE_V = os.getenv("OSFT_CACHE_V", "0") == "1"
 
 
 def _supports_use_batch() -> bool:
@@ -520,33 +535,38 @@ def reconstruct_weight_matrix(
     return reconstructed
 
 
-def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip_u: bool = False):
+def project_gradient_to_orthogonal_space(
+    svd_dict: SVDDecompositionDict,
+    *,
+    skip_u: bool = False,
+    cache_holder: "nn.Module | None" = None,
+):
     """
     Projects the gradient of the low-rank parameters (U_low, V_low) to be
     orthogonal to the frozen high-rank subspace.
 
-    Implements the orthogonal gradient projection from Nayak et al.,
-    "Sculpting Subspaces: Constrained Full Fine-Tuning in LLMs for Continual
-    Learning" (arXiv:2504.07097, Eq. 4, Theorem 1).  The projection ensures
-    that weight updates lie in the orthogonal complement of the frozen singular
-    subspace, bounding catastrophic forgetting via the Hierarchy of Forgetting
-    Bounds (Theorem 1).
+    Both projections use the factored form:
+      dU -= U_high @ (U_high^T @ dU)
+      dV -= (dV @ V_high^T) @ V_high
 
-    U projection uses the factored form  dU -= U_high @ (U_high^T @ dU)  with
-    a small (k, k_low) intermediate — the orthogonal complement projection
-    (I - U_high @ U_high^T) dU that removes the col(U_high) component
-    (cf. Edelman, Arias & Smith 1998, arXiv:physics/9806030, §2.5.1).
+    Under FSDP2, U_high is dim-0 sharded along N (the large dimension), so
+    U_high^T @ dU contracts over the sharded dim → partial sum → all-reduce
+    of a small (k_high, k_low) matrix.
 
-    V projection must use the Gram-matrix form
-    dV -= dV @ (V_high^T @ V_high)  because FSDP2 shards V_high on dim-0
-    (the singular-vector dimension), making the factored form
-    dV -= (dV @ V_high^T) @ V_high  produce column-blocks rather than
-    partial sums — requiring an all-gather instead of an all-reduce.
+    V_high is dim-0 sharded along k_high (the small dimension), so the
+    factored form requires an all-gather of V_high to get the full
+    (k_high, M) tensor.  This is M/k_high fewer bytes than the Gram
+    matrix all-reduce (k_high × M vs M × M) — 2x for square weights,
+    7x for down_proj where k_high = min(N, M) × (1 - URR).
 
     Args:
         svd_dict: Dictionary containing the SVD decomposition components.
         skip_u: If True, skip U projection (caller handles it externally,
             e.g. via batched all-reduce in distributed mode).
+        cache_holder: Optional module on which to cache the all-gathered
+            V_high.  V_high is frozen, so the cache is exact.  When provided
+            and OSFT_CACHE_V is enabled, V_high is all-gathered once and
+            reused on subsequent steps.
 
     TODO(osilkin): Add mixed-precision gradients here
     """
@@ -579,24 +599,69 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip
         else:
             dU.copy_(local_dU)
 
-    # Project V_low gradients to space orthogonal to row(V_high).
-    # V_high has shape (k, M) with orthonormal rows (from SVD).
-    # G = V_high^T @ V_high is the (M, M) orthogonal projector onto row(V_high).
-    # dV -= dV @ G  removes each row's component in that subspace.
+    # Project V_low gradients: dV -= (dV @ V_high^T) @ V_high
+    # All-gather V_high from FSDP2 shards (or use cache) — see docstring for cost analysis.
     if svd_dict["V_low"].grad is not None:
         dV = svd_dict["V_low"].grad
         local_V_high = getattr(V_high, "to_local", lambda: V_high)()
         local_dV = getattr(dV, "to_local", lambda: dV)()
 
-        # Compute Gram matrix G = V_high^T @ V_high for global projection across row-sharded V_high
-        # Assumes column dimension is consistent across ranks (row sharding over singular vectors)
-        G_local = torch.mm(local_V_high.transpose(0, 1), local_V_high)
-        if dist.is_initialized() and dist.get_world_size() > 1:
-            dist.all_reduce(G_local, op=dist.ReduceOp.SUM)
+        # V_high is frozen — reuse cached all-gathered tensor when available.
+        can_cache = OSFT_CACHE_V and cache_holder is not None
+        cached = getattr(cache_holder, "_osft_v_high_full", None) if can_cache else None
 
-        # Apply projection: dV = dV - dV @ G (use local shard of dV)
-        update = torch.mm(local_dV, G_local)
-        local_dV.add_(update, alpha=-1.0)
+        if cached is not None:
+            V_high_full = cached
+        else:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                full_k_high = svd_dict["rank_high"]
+                if local_V_high.shape[0] < full_k_high:
+                    # FSDP2-sharded: all-gather V_high from all ranks.
+                    world_size = dist.get_world_size()
+                    remainder = full_k_high % world_size
+                    if remainder == 0:
+                        # Even split — direct gather, no padding needed.
+                        V_high_full = torch.empty(
+                            full_k_high,
+                            local_V_high.shape[1],
+                            dtype=local_V_high.dtype,
+                            device=local_V_high.device,
+                        )
+                        dist.all_gather_into_tensor(V_high_full, local_V_high)
+                    else:
+                        # Uneven split — DTensor Shard(0) uses torch.chunk
+                        # semantics: only the last shard is short, so padding
+                        # lands at the tail of the gathered buffer.  Pad to
+                        # ceil rows for all_gather, then slice off padding.
+                        rows_per_rank = math.ceil(full_k_high / world_size)
+                        padded = torch.zeros(
+                            rows_per_rank,
+                            local_V_high.shape[1],
+                            dtype=local_V_high.dtype,
+                            device=local_V_high.device,
+                        )
+                        padded[: local_V_high.shape[0]].copy_(local_V_high)
+                        gathered = torch.empty(
+                            rows_per_rank * world_size,
+                            local_V_high.shape[1],
+                            dtype=local_V_high.dtype,
+                            device=local_V_high.device,
+                        )
+                        dist.all_gather_into_tensor(gathered, padded)
+                        V_high_full = gathered[:full_k_high]
+                else:
+                    # to_local() returned the full tensor (not FSDP-sharded)
+                    V_high_full = local_V_high
+            else:
+                V_high_full = local_V_high
+            if can_cache:
+                # .detach() ensures plain Tensor, not nn.Parameter — avoids
+                # nn.Module.__setattr__ registering it into state_dict.
+                cache_holder._osft_v_high_full = V_high_full.detach()
+
+        # Two local matmuls — no (M, M) intermediate
+        coeff = torch.mm(local_dV, V_high_full.transpose(0, 1))  # (k_low/P, k_high)
+        local_dV.addmm_(coeff, V_high_full, alpha=-1.0)  # (k_low/P, M)
 
         if hasattr(dV, "_local_tensor"):
             dV._local_tensor.copy_(local_dV)
@@ -1022,6 +1087,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             self.osft_paramspec_registry = {}
             self._osft_handles = {}
             self.osft_params = {}
+            # Clear any cached all-gathered V_high — V_high changes on reinit.
+            for module in self.modules():
+                if hasattr(module, "_osft_v_high_full"):
+                    del module._osft_v_high_full
 
         @staticmethod
         def _load_non_distributed(
@@ -2043,6 +2112,12 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             all-reduce instead of one per OSFT target. For Llama-8B with 224 targets
             this reduces 224 U all-reduce kernel launches to 1, cutting latency from
             collective launch overhead. V projections continue per-module.
+
+            When ``OSFT_CACHE_V=1`` is set, the all-gathered V_high tensor is
+            cached on each module after the first step.  V_high is frozen, so
+            the cache is exact.  This eliminates per-step V all-gather traffic.
+            Default is off because the cache is replicated on every FSDP2 rank
+            (~5.1 GB for Llama-8B, infeasible for 70B+).
             """
             is_distributed = dist.is_initialized() and dist.get_world_size() > 1
 
@@ -2067,7 +2142,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         svd_dict = self.get_svd_dict_for_module(module)
                     except ValueError as err:
                         raise ValueError(f"error in projecting gradients for module: {module}") from err
-                    project_gradient_to_orthogonal_space(svd_dict)
+                    project_gradient_to_orthogonal_space(svd_dict, cache_holder=module)
                 return
 
             # Distributed: batch U projection all-reduces.
@@ -2084,6 +2159,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             u_work = []  # (local_U_high, local_dU, dU, coeff_shape) per target
             u_flat_parts = []
             svd_dicts = []
+            svd_modules = []
 
             for module in osft_modules:
                 try:
@@ -2091,6 +2167,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 except ValueError as err:
                     raise ValueError(f"error in projecting gradients for module: {module}") from err
                 svd_dicts.append(svd_dict)
+                svd_modules.append(module)
 
                 if svd_dict["U_low"].grad is not None:
                     dU = svd_dict["U_low"].grad
@@ -2125,12 +2202,29 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     f"Batch split consumed {offset} elements but tensor has {batched.numel()}"
                 )
 
-            # V projections: per-module (Gram matrix all-reduce per target).
+            # V projections: per-module factored V all-gather.
             # Reuse the shared function with skip_u=True to avoid code
             # duplication — the V projection logic is identical to the
             # non-batched path.
-            for svd_dict in svd_dicts:
-                project_gradient_to_orthogonal_space(svd_dict, skip_u=True)
+            caches_populated_this_call = 0
+            for svd_dict, module in zip(svd_dicts, svd_modules):
+                had_cache = hasattr(module, "_osft_v_high_full")
+                project_gradient_to_orthogonal_space(svd_dict, skip_u=True, cache_holder=module)
+                if not had_cache and hasattr(module, "_osft_v_high_full"):
+                    caches_populated_this_call += 1
+
+            if caches_populated_this_call > 0:
+                total_bytes = sum(
+                    module._osft_v_high_full.nelement() * module._osft_v_high_full.element_size()
+                    for module in self.modules()
+                    if hasattr(module, "_osft_v_high_full")
+                )
+                log_rank_0(
+                    f"Cached {caches_populated_this_call} V_high tensors "
+                    f"({total_bytes / 1e9:.2f} GB). "
+                    f"Subsequent steps skip V all-gathers. "
+                    f"Set OSFT_CACHE_V=0 to disable."
+                )
 
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""

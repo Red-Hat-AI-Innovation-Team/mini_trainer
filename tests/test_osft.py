@@ -1572,6 +1572,8 @@ class TestBatchedUAllReduce:
         # No-op all_reduce: with a single real rank, the local value IS the
         # global value, so identity is correct.
         monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None: None)
+        # V projection detects that local_V_high is already the full tensor
+        # (shape[0] == rank_high) and skips all_gather, so no mock needed.
         model_bat.project_gradients()  # takes batched path
 
         # Compare every projected gradient
@@ -1587,6 +1589,556 @@ class TestBatchedUAllReduce:
             assert torch.equal(p_ref.grad, p_bat.grad), (
                 f"Gradient mismatch on {n_ref}: max |diff| = {(p_ref.grad - p_bat.grad).abs().max():.2e}"
             )
+
+
+class TestVProjectionCache:
+    """Test V_high caching in factored V projection."""
+
+    def _create_simple_osft_model(self, hidden_size=32, rank_ratio=0.5):
+        """Create a simple model with OSFT for testing."""
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.linear = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.dtype = torch.float32
+                nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(SimpleModel)
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {"linear.weight": int(hidden_size * rank_ratio)}
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32,
+        )
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = rank_ratio
+        model.reinitialize_osft(decompose_existing_weights=True)
+        return model
+
+    def test_cache_populated_after_first_projection(self, monkeypatch):
+        """V_high cache should be set on the module after the first call."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        # Before projection: no cache
+        for module in model.modules():
+            if hasattr(module, "osft_params"):
+                assert not hasattr(module, "_osft_v_high_full")
+
+        # Forward + backward
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+
+        model.project_gradients()
+
+        # After projection: cache should exist
+        cached_count = 0
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full"):
+                cached_count += 1
+                V = module._osft_v_high_full
+                assert V.ndim == 2
+                # Cached V_high should match V_high shape (k_high, M)
+                assert V.shape == module.osft_V_high.shape
+        assert cached_count > 0
+
+    def test_cached_v_high_matches_original(self, monkeypatch):
+        """Cached V_high should be identical to the original V_high (single GPU)."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full") and hasattr(module, "osft_V_high"):
+                cached = module._osft_v_high_full
+                original = module.osft_V_high
+                assert torch.equal(cached, original), "Cached V_high differs from original"
+
+    def test_cache_smaller_than_gram(self, monkeypatch):
+        """Cached V_high (k_high, M) should be smaller than the Gram matrix (M, M)."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model(hidden_size=32, rank_ratio=0.5)
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full") and hasattr(module, "osft_V_high"):
+                V = module._osft_v_high_full
+                M = V.shape[1]
+                cache_elements = V.nelement()  # k_high * M
+                gram_elements = M * M  # M * M
+                assert cache_elements < gram_elements, (
+                    f"Cache ({cache_elements}) should be smaller than Gram ({gram_elements})"
+                )
+
+    def test_factored_matches_gram_projection(self):
+        """Factored V projection should produce the same result as Gram-based projection."""
+        torch.manual_seed(42)
+        model = self._create_simple_osft_model(hidden_size=32, rank_ratio=0.5)
+        model.train()
+
+        # Get V_high for manual Gram-based projection
+        V_high = None
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                V_high = module.osft_V_high.clone()
+                break
+        assert V_high is not None
+
+        # Forward + backward
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+
+        # Save raw gradient before projection
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and hasattr(module, "osft_params"):
+                raw_dV = module.osft_params.V_low.grad.clone()
+                break
+
+        # Apply factored projection (the actual code path)
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and hasattr(module, "osft_params"):
+                factored_result = module.osft_params.V_low.grad.clone()
+                break
+
+        # Compute Gram-based projection manually for comparison
+        G = V_high.T @ V_high
+        gram_result = raw_dV - raw_dV @ G
+
+        assert torch.allclose(factored_result, gram_result, atol=1e-6), (
+            f"Factored and Gram projections differ: max diff = {(factored_result - gram_result).abs().max().item()}"
+        )
+
+    def test_factored_matches_gram_rectangular(self):
+        """Factored and Gram agree for rectangular weights (the down_proj-like 7x case).
+
+        For down_proj, N < M so k_high = min(N,M)/2 is small relative to M.
+        This exercises the high-ratio regime where the factored form saves 7x.
+        """
+        torch.manual_seed(42)
+        # Mimic down_proj shape ratio: N=16, M=56 → k_high=8, M=56 → ratio=7x
+        N, M = 16, 56
+        k_high = N // 2  # 8
+        k_low = N - k_high  # 8
+
+        # Create orthonormal V_high (k_high, M) via QR
+        V_high = torch.linalg.qr(torch.randn(M, k_high))[0].T  # (k_high, M)
+        assert V_high.shape == (k_high, M)
+
+        dV = torch.randn(k_low, M)
+
+        # Gram form: dV - dV @ (V_high^T @ V_high)
+        G = V_high.T @ V_high  # (M, M) = (56, 56)
+        gram_result = dV - dV @ G
+
+        # Factored form: dV - (dV @ V_high^T) @ V_high
+        coeff = dV @ V_high.T  # (k_low, k_high) = (8, 8)
+        factored_result = dV - coeff @ V_high
+
+        # Verify sizes confirm the 7x ratio
+        assert G.nelement() == M * M  # 3136
+        assert V_high.nelement() == k_high * M  # 448
+        assert G.nelement() / V_high.nelement() == M / k_high  # 7.0
+
+        assert torch.allclose(factored_result, gram_result, atol=1e-6), (
+            f"Factored and Gram differ for rectangular case: max diff = "
+            f"{(factored_result - gram_result).abs().max().item()}"
+        )
+
+    def test_projection_identical_with_and_without_cache(self, monkeypatch):
+        """Projection results should be identical whether or not the cache is used."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        torch.manual_seed(42)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        # Step 1: populates cache
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.SGD(osft_params, lr=1e-3)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # Step 2: uses cache — save projected gradient
+        x2 = torch.randn(4, 32)
+        loss2 = model.linear(x2).pow(2).sum()
+        loss2.backward()
+        model.project_gradients()
+
+        grad_with_cache = {}
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                grad_with_cache["V_low"] = module.osft_params.V_low.grad.clone()
+                grad_with_cache["U_low"] = module.osft_params.U_low.grad.clone()
+
+        # Now clear cache and redo the same step
+        optimizer.zero_grad()
+        for module in model.modules():
+            if hasattr(module, "_osft_v_high_full"):
+                del module._osft_v_high_full
+
+        loss2b = model.linear(x2).pow(2).sum()
+        loss2b.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                assert torch.equal(module.osft_params.V_low.grad, grad_with_cache["V_low"]), (
+                    "V_low gradient differs with vs without cache"
+                )
+                assert torch.equal(module.osft_params.U_low.grad, grad_with_cache["U_low"]), (
+                    "U_low gradient differs with vs without cache"
+                )
+
+    def test_cache_disabled_by_default(self, monkeypatch):
+        """Cache should not be populated when OSFT_CACHE_V is at its default (off)."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", False)
+
+        model = self._create_simple_osft_model()
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        for module in model.modules():
+            assert not hasattr(module, "_osft_v_high_full"), (
+                "Cache should not be populated when OSFT_CACHE_V is disabled"
+            )
+
+    def test_orthogonality_maintained_with_cache(self, monkeypatch):
+        """Orthogonality must hold across multiple steps with caching active."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
+        optim_wrapper(optimizer, model)
+
+        for step in range(1, 11):
+            x = torch.randn(4, 32)
+            loss = model.linear(x).pow(2).sum()
+            loss.backward()
+
+            # project_gradients is called inside optim_wrapper's step()
+            optimizer.step()
+
+            for module in model.modules():
+                if (
+                    hasattr(module, "osft_params")
+                    and hasattr(module, "osft_U_high")
+                    and hasattr(module, "osft_S_high")
+                    and hasattr(module, "osft_V_high")
+                ):
+                    check_parameter_orthogonality(model, module, step, tracker)
+
+            optimizer.zero_grad()
+
+        assert tracker.is_successful(), f"Orthogonality violated with V_high caching:\n{tracker.get_summary()}"
+
+    def test_cache_cleared_by_reset_osft_metadata(self, monkeypatch):
+        """_reset_osft_metadata must clear cached V_high tensors.
+
+        reinitialize_osft calls _reset_osft_metadata, which creates new V_high
+        tensors.  Any cached all-gathered V_high from the old decomposition
+        would be stale.  This test verifies the cache is cleared.
+        """
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        # Populate cache
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        # Verify cache exists
+        cached_modules = [m for m in model.modules() if hasattr(m, "_osft_v_high_full")]
+        assert len(cached_modules) > 0, "Cache should be populated before reset"
+
+        # _reset_osft_metadata is the mechanism reinitialize_osft uses
+        model._reset_osft_metadata()
+
+        # Cache must be gone
+        for module in model.modules():
+            assert not hasattr(module, "_osft_v_high_full"), "Cache was not cleared by _reset_osft_metadata"
+
+    def test_cache_not_in_state_dict(self, monkeypatch):
+        """Cached V_high tensors must not appear in model state_dict."""
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+        model = self._create_simple_osft_model()
+        model.train()
+
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+        model.project_gradients()
+
+        # Verify cache exists
+        assert any(hasattr(m, "_osft_v_high_full") for m in model.modules())
+
+        # Verify it's not in state_dict
+        sd = model.state_dict()
+        for key in sd:
+            assert "_osft_v_high_full" not in key, f"Cache leaked into state_dict: {key}"
+
+
+class TestUnevenShardDeinterleave:
+    """Test the uneven-shard de-interleave path in factored V projection.
+
+    When k_high % world_size != 0, DTensor Shard(0) uses torch.chunk
+    semantics: all shards have ceil(k_high/ws) rows except the last
+    which gets the remainder.  all_gather_into_tensor requires equal-
+    sized inputs, so each shard is padded to ceil rows.  After gathering,
+    padding zeros are interspersed (not at the tail) and must be
+    extracted per rank.
+
+    These tests mock the distributed primitives to exercise the de-interleave
+    logic from a single-process test.
+    """
+
+    @staticmethod
+    def _make_ortho_V(k_high, M):
+        """Create an orthonormal (k_high, M) matrix via QR."""
+        Q = torch.linalg.qr(torch.randn(M, k_high, dtype=torch.float64))[0]
+        return Q.T[:k_high].contiguous()  # (k_high, M)
+
+    @staticmethod
+    def _shard_dtensor_style(V_full, world_size):
+        """Split V_full (k_high, M) into per-rank shards using torch.chunk semantics.
+
+        DTensor Shard(0) uses torch.chunk: all shards have ceil(k/ws) rows
+        except the last which gets the remainder.
+        """
+        return list(torch.chunk(V_full, world_size, dim=0))
+
+    def _run_uneven_shard_test(self, k_high, world_size, monkeypatch):
+        """Run one uneven-shard test case.
+
+        Simulates rank 0's view: its local shard is chunk[0].
+        The mock all_gather fills the output buffer with all ranks' padded shards.
+        Then project_gradient_to_orthogonal_space de-interleaves and projects.
+        """
+        import math
+
+        import torch.distributed as dist
+
+        M = k_high * 3  # arbitrary, just needs M > k_high
+        k_low = max(k_high // 2, 1)
+
+        torch.manual_seed(42)
+        V_full = self._make_ortho_V(k_high, M)
+        dV_raw = torch.randn(k_low, M, dtype=torch.float64)
+
+        # Reference: non-distributed factored projection
+        coeff_ref = dV_raw @ V_full.T
+        dV_ref = dV_raw - coeff_ref @ V_full
+
+        # Shards as DTensor Shard(0) would produce
+        shards = self._shard_dtensor_style(V_full, world_size)
+        local_shard = shards[0]  # rank 0's shard
+
+        # Build mock all_gather: simulate all ranks contributing padded shards
+        rows_per_rank = math.ceil(k_high / world_size)
+
+        def mock_all_gather(output, input_tensor):
+            """Fill output with padded shards from all ranks."""
+            for i, shard in enumerate(shards):
+                padded = torch.zeros(rows_per_rank, M, dtype=V_full.dtype, device=V_full.device)
+                padded[: shard.shape[0]].copy_(shard)
+                output[i * rows_per_rank : (i + 1) * rows_per_rank].copy_(padded)
+
+        # Create a V_high tensor with to_local() returning the local shard
+        class FakeShardedTensor:
+            """Mimics a DTensor with to_local() returning the local shard."""
+
+            def __init__(self, local):
+                self._local = local
+
+            def to_local(self):
+                return self._local
+
+            # Proxy attribute access to the local tensor for anything else
+            def __getattr__(self, name):
+                return getattr(self._local, name)
+
+        fake_V_high = FakeShardedTensor(local_shard)
+
+        # Build svd_dict — only V_low grad and V_high matter for skip_u=True
+        V_low = nn.Parameter(torch.randn(k_low, M, dtype=torch.float64))
+        V_low.grad = dV_raw.clone()
+
+        svd_dict = {
+            "U_high": torch.randn(1, 1, dtype=torch.float64),  # unused with skip_u
+            "S_high": torch.randn(k_high, dtype=torch.float64),
+            "V_high": fake_V_high,
+            "U_low": nn.Parameter(torch.randn(1, 1, dtype=torch.float64)),
+            "S_low": nn.Parameter(torch.randn(1, dtype=torch.float64)),
+            "V_low": V_low,
+            "rank_high": k_high,
+        }
+
+        # Mock distributed
+        monkeypatch.setattr(dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(dist, "get_world_size", lambda: world_size)
+        monkeypatch.setattr(dist, "all_gather_into_tensor", mock_all_gather)
+
+        project_gradient_to_orthogonal_space(svd_dict, skip_u=True)
+
+        projected_dV = V_low.grad
+        assert torch.allclose(projected_dV, dV_ref, atol=1e-10), (
+            f"Uneven shard de-interleave failed for k_high={k_high}, ws={world_size}: "
+            f"max |diff| = {(projected_dV - dV_ref).abs().max().item():.2e}"
+        )
+
+        # Verify orthogonality: projected gradient has no component in row(V_high)
+        overlap = projected_dV @ V_full.T
+        assert torch.allclose(overlap, torch.zeros_like(overlap), atol=1e-10), (
+            f"Projected gradient not orthogonal to V_high: max |dV @ V_high^T| = {overlap.abs().max().item():.2e}"
+        )
+
+    @pytest.mark.parametrize(
+        "k_high,world_size",
+        [
+            (7, 3),  # chunk sizes [3, 3, 1]
+            (5, 3),  # chunk sizes [2, 2, 1]
+            (10, 3),  # chunk sizes [4, 4, 2]
+            (11, 4),  # chunk sizes [3, 3, 3, 2]
+            (3, 2),  # chunk sizes [2, 1]
+        ],
+    )
+    def test_uneven_shard_cases(self, k_high, world_size, monkeypatch):
+        """Uneven shard de-interleave must recover the correct V_high."""
+        self._run_uneven_shard_test(k_high, world_size, monkeypatch)
+
+    @pytest.mark.parametrize(
+        "k_high,world_size",
+        [
+            (6, 3),  # even: shards [2, 2, 2]
+            (8, 4),  # even: shards [2, 2, 2, 2]
+            (10, 2),  # even: shards [5, 5]
+        ],
+    )
+    def test_even_shard_baseline(self, k_high, world_size, monkeypatch):
+        """Even shards (no remainder) should also work correctly."""
+        self._run_uneven_shard_test(k_high, world_size, monkeypatch)
+
+    def test_cache_stores_deinterleaved_v_high(self, monkeypatch):
+        """Cache must store the correctly de-interleaved V_high, not raw gathered buffer.
+
+        Step 1 populates the cache via the uneven all-gather path.
+        Step 2 hits the cache (no all-gather).  Both must produce the
+        same projection as the non-distributed reference.
+        """
+        import math
+
+        import torch.distributed as dist
+
+        monkeypatch.setattr(osft_module, "OSFT_CACHE_V", True)
+
+        k_high, world_size = 7, 3  # uneven: chunk sizes [3, 3, 1]
+        M = k_high * 3
+        k_low = k_high // 2
+
+        torch.manual_seed(42)
+        V_full = self._make_ortho_V(k_high, M)
+        shards = self._shard_dtensor_style(V_full, world_size)
+        local_shard = shards[0]
+        rows_per_rank = math.ceil(k_high / world_size)
+
+        gather_call_count = 0
+
+        def mock_all_gather(output, input_tensor):
+            nonlocal gather_call_count
+            gather_call_count += 1
+            for i, shard in enumerate(shards):
+                padded = torch.zeros(rows_per_rank, M, dtype=V_full.dtype, device=V_full.device)
+                padded[: shard.shape[0]].copy_(shard)
+                output[i * rows_per_rank : (i + 1) * rows_per_rank].copy_(padded)
+
+        monkeypatch.setattr(dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(dist, "get_world_size", lambda: world_size)
+        monkeypatch.setattr(dist, "all_gather_into_tensor", mock_all_gather)
+
+        class FakeShardedTensor:
+            def __init__(self, local):
+                self._local = local
+
+            def to_local(self):
+                return self._local
+
+            def __getattr__(self, name):
+                return getattr(self._local, name)
+
+        cache_holder = nn.Module()
+
+        results = []
+        for step in range(2):
+            dV_raw = torch.randn(k_low, M, dtype=torch.float64)
+            dV_ref = dV_raw - (dV_raw @ V_full.T) @ V_full
+
+            V_low = nn.Parameter(torch.randn(k_low, M, dtype=torch.float64))
+            V_low.grad = dV_raw.clone()
+
+            svd_dict = {
+                "U_high": torch.randn(1, 1, dtype=torch.float64),
+                "S_high": torch.randn(k_high, dtype=torch.float64),
+                "V_high": FakeShardedTensor(local_shard),
+                "U_low": nn.Parameter(torch.randn(1, 1, dtype=torch.float64)),
+                "S_low": nn.Parameter(torch.randn(1, dtype=torch.float64)),
+                "V_low": V_low,
+                "rank_high": k_high,
+            }
+
+            project_gradient_to_orthogonal_space(svd_dict, skip_u=True, cache_holder=cache_holder)
+            results.append((V_low.grad.clone(), dV_ref))
+
+        # Step 1 should have called all_gather; step 2 should have used cache
+        assert gather_call_count == 1, f"Expected 1 all_gather call, got {gather_call_count}"
+        assert hasattr(cache_holder, "_osft_v_high_full"), "Cache was not populated"
+
+        # Both steps must match reference
+        for step, (projected, ref) in enumerate(results):
+            assert torch.allclose(projected, ref, atol=1e-10), (
+                f"Step {step}: projection wrong, max |diff| = {(projected - ref).abs().max().item():.2e}"
+            )
+
+        # Cached tensor must equal the full V_high (not the padded gathered buffer)
+        assert cache_holder._osft_v_high_full.shape == (k_high, M), (
+            f"Cached shape {cache_holder._osft_v_high_full.shape} != expected ({k_high}, {M})"
+        )
+        assert torch.allclose(cache_holder._osft_v_high_full, V_full, atol=1e-10), (
+            "Cached V_high differs from original — may contain padding"
+        )
 
 
 class TestLazyInitTokenizerAlignment:
