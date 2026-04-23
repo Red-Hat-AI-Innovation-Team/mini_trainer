@@ -24,6 +24,20 @@ OSFT_CACHE_CLEAR_INTERVAL = int(
     os.getenv("OSFT_CACHE_CLEAR_INTERVAL", 5)
 )  # Clear GPU cache every N parameters during matrix reconstruction
 
+# Opt-in: cache the all-gathered (full) V_high to avoid repeating the
+# all-gather on every step.  V_high is frozen (requires_grad=False), so the
+# cache is exact.
+#
+# V projection uses the factored form: dV -= (dV @ V_high^T) @ V_high.
+# Under FSDP2, V_high is dim-0 sharded, so the factored form requires an
+# all-gather of V_high (k_high x M).  Caching stores the all-gathered result.
+#
+# Default OFF because the cache is REPLICATED on every FSDP2 rank (not
+# sharded), adding ~5.1 GB per rank for Llama-8B (all 224 targets in bf16).
+# For Llama-70B+ the cache exceeds GPU memory.  Set to "1" only after
+# confirming sufficient memory headroom.
+OSFT_CACHE_V = os.getenv("OSFT_CACHE_V", "0") == "1"
+
 
 def _supports_use_batch() -> bool:
     """Check if torch.distributed send/recv_object_list support the use_batch parameter (PyTorch 2.9+)."""
@@ -520,22 +534,23 @@ def reconstruct_weight_matrix(
     return reconstructed
 
 
-def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip_u: bool = False):
+def project_gradient_to_orthogonal_space(
+    svd_dict: SVDDecompositionDict,
+    *,
+    skip_u: bool = False,
+    cache_holder: "nn.Module | None" = None,
+):
     """
     Projects the gradient of the low-rank parameters (U_low, V_low) to be
     orthogonal to the frozen high-rank subspace.
 
-    Implements the orthogonal gradient projection from Nayak et al.,
-    "Sculpting Subspaces: Constrained Full Fine-Tuning in LLMs for Continual
-    Learning" (arXiv:2504.07097, Eq. 4, Theorem 1).  The projection ensures
-    that weight updates lie in the orthogonal complement of the frozen singular
-    subspace, bounding catastrophic forgetting via the Hierarchy of Forgetting
-    Bounds (Theorem 1).
+    Both projections use the factored form:
+      dU -= U_high @ (U_high^T @ dU)
+      dV -= (dV @ V_high^T) @ V_high
 
-    U projection uses the factored form  dU -= U_high @ (U_high^T @ dU)  with
-    a small (k, k_low) intermediate — the orthogonal complement projection
-    (I - U_high @ U_high^T) dU that removes the col(U_high) component
-    (cf. Edelman, Arias & Smith 1998, arXiv:physics/9806030, §2.5.1).
+    Under FSDP2, U_high is dim-0 sharded along N (the large dimension), so
+    U_high^T @ dU contracts over the sharded dim → partial sum → all-reduce
+    of a small (k_high, k_low) matrix.
 
     V projection uses the factored form  dV -= (dV @ V_high^T) @ V_high
     with a small (rank_low, rank_high) intermediate.  When FSDP2 shards
@@ -547,6 +562,7 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict, *, skip
         svd_dict: Dictionary containing the SVD decomposition components.
         skip_u: If True, skip U projection (caller handles it externally,
             e.g. via batched all-reduce in distributed mode).
+        cache_holder: Unused, kept for backwards compatibility.
 
     TODO(osilkin): Add mixed-precision gradients here
     """
@@ -1022,6 +1038,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             self.osft_paramspec_registry = {}
             self._osft_handles = {}
             self.osft_params = {}
+            # Clear any cached all-gathered V_high — V_high changes on reinit.
+            for module in self.modules():
+                if hasattr(module, "_osft_v_high_full"):
+                    del module._osft_v_high_full
 
         @staticmethod
         def _load_non_distributed(
@@ -2042,10 +2062,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             This method should be called after backpropagation and before optimizer step.
 
-            In distributed mode, U projection coefficients are batched into a single
-            all-reduce instead of one per OSFT target. For Llama-8B with 224 targets
-            this reduces 224 U all-reduce kernel launches to 1, cutting latency from
-            collective launch overhead. V projections continue per-module.
+            In distributed mode, both U and V projection coefficients are batched
+            into a single all-reduce each, instead of one per OSFT target.  For
+            Llama-8B with 224 targets this reduces 448 all-reduce kernel launches
+            to 2, cutting latency from collective launch overhead.
             """
             is_distributed = dist.is_initialized() and dist.get_world_size() > 1
 
@@ -2070,7 +2090,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         svd_dict = self.get_svd_dict_for_module(module)
                     except ValueError as err:
                         raise ValueError(f"error in projecting gradients for module: {module}") from err
-                    project_gradient_to_orthogonal_space(svd_dict)
+                    project_gradient_to_orthogonal_space(svd_dict, cache_holder=module)
                 return
 
             # Distributed: batch U projection all-reduces.
@@ -2087,6 +2107,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             u_work = []  # (local_U_high, local_dU, dU, coeff_shape) per target
             u_flat_parts = []
             svd_dicts = []
+            svd_modules = []
 
             for module in osft_modules:
                 try:
@@ -2094,6 +2115,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 except ValueError as err:
                     raise ValueError(f"error in projecting gradients for module: {module}") from err
                 svd_dicts.append(svd_dict)
+                svd_modules.append(module)
 
                 if svd_dict["U_low"].grad is not None:
                     dU = svd_dict["U_low"].grad

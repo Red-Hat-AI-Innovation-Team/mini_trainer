@@ -3,10 +3,12 @@ import inspect
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper as ptd_checkpoint_wrapper
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
@@ -113,6 +115,7 @@ class ModelInitializationContext:
     is_osft: bool = False
     state_dict: dict[str, torch.Tensor] | None = None
     train_dtype: torch.dtype | None = None
+    resume_from_checkpoint: str | None = None
 
 
 def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
@@ -571,15 +574,54 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
         _require_distributed_initialized("OSFT finalization")
         log_rank_0("🔄 [Phase 3] Finalizing OSFT initialization")
 
-        # Step 1: Synchronize non-OSFT parameters across ranks
-        log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
-        model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
-        log_rank_0("   ✓ Non-OSFT parameters distributed")
+        if context.resume_from_checkpoint:
+            # Resume path: use normal SVD initialization to materialize meta
+            # tensors with correct FSDP2 tracking, then overwrite values from
+            # checkpoint. We MUST use SVD for materialization because replacing
+            # DTensor objects breaks FSDP2's FSDPParam references and mixed
+            # precision (reduce_dtype/param_dtype) tracking.
+            log_rank_0("🔄 [OSFT] Materializing via SVD, then loading checkpoint")
 
-        # Step 2: Compute distributed SVD and distribute OSFT parameters
-        log_rank_0("🔄 [OSFT] Computing distributed SVD for OSFT parameters")
-        model.compute_distributed_svd(model, context.state_dict)
-        log_rank_0("   ✓ OSFT parameters computed and distributed")
+            # Step 1: Normal materialization
+            log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
+            model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+            log_rank_0("   ✓ Non-OSFT parameters distributed")
+
+            log_rank_0("🔄 [OSFT] Computing SVD for materialization")
+            model.compute_distributed_svd(model, context.state_dict)
+            log_rank_0("   ✓ Parameters materialized")
+
+            # Step 2: Overwrite with checkpoint values via DCP in-place.
+            # model.state_dict() returns tensors sharing storage with the
+            # FSDP2-tracked parameters, so DCP writes go directly into them.
+            log_rank_0("🔄 [OSFT] Loading checkpoint state via DCP")
+            checkpoint_dir = Path(context.resume_from_checkpoint)
+            dcp_dir = str(checkpoint_dir / "distributed")
+            from torch.distributed.checkpoint import FileSystemReader
+
+            reader = FileSystemReader(dcp_dir)
+            ckpt_metadata = reader.read_metadata()
+            ckpt_keys = {k[len("model.") :] for k in ckpt_metadata.state_dict_metadata if k.startswith("model.")}
+
+            sd = model.state_dict()
+            missing_in_ckpt = set(sd.keys()) - ckpt_keys
+            if missing_in_ckpt:
+                log_rank_0(f"   Skipping {len(missing_in_ckpt)} keys not in checkpoint")
+                sd = {k: v for k, v in sd.items() if k in ckpt_keys}
+
+            dcp.load({"model": sd}, checkpoint_id=dcp_dir)
+            log_rank_0("   ✓ Model state loaded from checkpoint")
+        else:
+            # Normal path: compute distributed SVD
+            # Step 1: Synchronize non-OSFT parameters across ranks
+            log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
+            model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+            log_rank_0("   ✓ Non-OSFT parameters distributed")
+
+            # Step 2: Compute distributed SVD and distribute OSFT parameters
+            log_rank_0("🔄 [OSFT] Computing distributed SVD for OSFT parameters")
+            model.compute_distributed_svd(model, context.state_dict)
+            log_rank_0("   ✓ OSFT parameters computed and distributed")
 
         # Mark OSFT initialization as complete
         model.mark_fsdp2_initialized()
@@ -974,6 +1016,15 @@ def setup_model(
         except (ImportError, AttributeError) as e:
             log_rank_0(f"Could not patch mamba kernels ({e}); GraniteMoeHybrid may use Hub kernels")
 
+    # Compatibility shim for Nemotron's remote code which imports a
+    # function that was renamed in transformers 5.x. Without this,
+    # trust_remote_code=True fails with ImportError.
+    if getattr(model_config, "model_type", None) == "nemotron_h":
+        from transformers.utils import import_utils as _iu
+
+        if not hasattr(_iu, "is_flash_attn_greater_or_equal_2_10"):
+            _iu.is_flash_attn_greater_or_equal_2_10 = lambda: _iu.is_flash_attn_greater_or_equal("2.10")
+
     # Set up quantization config for GPT-OSS models
     if is_gpt_oss:
         try:
@@ -1243,6 +1294,7 @@ def setup_training_components(
     beta2: float = 0.95,
     eps: float = 1e-8,
     weight_decay: float = 0.0,
+    resume_from_checkpoint: str | None = None,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -1271,6 +1323,7 @@ def setup_training_components(
 
     # Phase 1: Prepare model for FSDP2 wrapping
     init_context = prepare_model_for_fsdp2(model)
+    init_context.resume_from_checkpoint = resume_from_checkpoint
 
     # Phase 2: Pure FSDP2 wrapping
     model = wrap_fsdp2(model)

@@ -51,7 +51,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Pre-fetch fork PR branch
+        if: github.event.issue.pull_request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER=${{ github.event.issue.number }}
+          HEAD_REF=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.ref')
+          HEAD_REPO=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.repo.full_name')
+          if [ "$HEAD_REPO" != "${{ github.repository }}" ]; then
+            echo "Fork PR detected: $HEAD_REPO/$HEAD_REF"
+            git fetch origin "pull/$PR_NUMBER/head:$HEAD_REF"
+            git fetch origin "pull/$PR_NUMBER/head:refs/remotes/origin/$HEAD_REF"
+          fi
 
       - name: Load shared skills
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

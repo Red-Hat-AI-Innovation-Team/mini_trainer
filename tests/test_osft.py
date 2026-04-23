@@ -1572,6 +1572,8 @@ class TestBatchedUAllReduce:
         # No-op all_reduce: with a single real rank, the local value IS the
         # global value, so identity is correct.
         monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None: None)
+        # V projection detects that local_V_high is already the full tensor
+        # (shape[0] == rank_high) and skips all_gather, so no mock needed.
         model_bat.project_gradients()  # takes batched path
 
         # Compare every projected gradient
@@ -1587,6 +1589,115 @@ class TestBatchedUAllReduce:
             assert torch.equal(p_ref.grad, p_bat.grad), (
                 f"Gradient mismatch on {n_ref}: max |diff| = {(p_ref.grad - p_bat.grad).abs().max():.2e}"
             )
+
+
+class TestVProjectionFactored:
+    """Test factored V projection correctness (dV -= (dV @ V_high^T) @ V_high)."""
+
+    def _create_simple_osft_model(self, hidden_size=32, rank_ratio=0.5):
+        """Create a simple model with OSFT for testing."""
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.linear = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.dtype = torch.float32
+                nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(SimpleModel)
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {"linear.weight": int(hidden_size * rank_ratio)}
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32,
+        )
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = rank_ratio
+        model.reinitialize_osft(decompose_existing_weights=True)
+        return model
+
+    def test_factored_matches_gram_projection(self):
+        """Factored V projection should produce the same result as Gram-based projection."""
+        torch.manual_seed(42)
+        model = self._create_simple_osft_model(hidden_size=32, rank_ratio=0.5)
+        model.train()
+
+        # Get V_high for manual Gram-based projection
+        V_high = None
+        for module in model.modules():
+            if hasattr(module, "osft_V_high"):
+                V_high = module.osft_V_high.clone()
+                break
+        assert V_high is not None
+
+        # Forward + backward
+        x = torch.randn(4, 32)
+        loss = model.linear(x).pow(2).sum()
+        loss.backward()
+
+        # Save raw gradient before projection
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and hasattr(module, "osft_params"):
+                raw_dV = module.osft_params.V_low.grad.clone()
+                break
+
+        # Apply factored projection (the actual code path)
+        model.project_gradients()
+
+        for module in model.modules():
+            if hasattr(module, "osft_V_high") and hasattr(module, "osft_params"):
+                factored_result = module.osft_params.V_low.grad.clone()
+                break
+
+        # Compute Gram-based projection manually for comparison
+        G = V_high.T @ V_high
+        gram_result = raw_dV - raw_dV @ G
+
+        assert torch.allclose(factored_result, gram_result, atol=1e-6), (
+            f"Factored and Gram projections differ: max diff = {(factored_result - gram_result).abs().max().item()}"
+        )
+
+    def test_factored_matches_gram_rectangular(self):
+        """Factored and Gram agree for rectangular weights (the down_proj-like 7x case).
+
+        For down_proj, N < M so k_high = min(N,M)/2 is small relative to M.
+        This exercises the high-ratio regime where the factored form saves 7x.
+        """
+        torch.manual_seed(42)
+        # Mimic down_proj shape ratio: N=16, M=56 → k_high=8, M=56 → ratio=7x
+        N, M = 16, 56
+        k_high = N // 2  # 8
+        k_low = N - k_high  # 8
+
+        # Create orthonormal V_high (k_high, M) via QR
+        V_high = torch.linalg.qr(torch.randn(M, k_high))[0].T  # (k_high, M)
+        assert V_high.shape == (k_high, M)
+
+        dV = torch.randn(k_low, M)
+
+        # Gram form: dV - dV @ (V_high^T @ V_high)
+        G = V_high.T @ V_high  # (M, M) = (56, 56)
+        gram_result = dV - dV @ G
+
+        # Factored form: dV - (dV @ V_high^T) @ V_high
+        coeff = dV @ V_high.T  # (k_low, k_high) = (8, 8)
+        factored_result = dV - coeff @ V_high
+
+        # Verify sizes confirm the 7x ratio
+        assert G.nelement() == M * M  # 3136
+        assert V_high.nelement() == k_high * M  # 448
+        assert G.nelement() / V_high.nelement() == M / k_high  # 7.0
+
+        assert torch.allclose(factored_result, gram_result, atol=1e-6), (
+            f"Factored and Gram differ for rectangular case: max diff = "
+            f"{(factored_result - gram_result).abs().max().item()}"
+        )
 
 
 class TestLazyInitTokenizerAlignment:
