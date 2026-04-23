@@ -2292,9 +2292,9 @@ class TestPostStepParameterProjection:
                     module.osft_params.U_low.data += U_high @ torch.randn(
                         U_high.shape[1], module.osft_params.U_low.shape[1]
                     )
-                    module.osft_params.V_low.data += torch.randn(
-                        module.osft_params.V_low.shape[0], V_high.shape[0]
-                    ) @ V_high
+                    module.osft_params.V_low.data += (
+                        torch.randn(module.osft_params.V_low.shape[0], V_high.shape[0]) @ V_high
+                    )
 
         # Now project parameters
         model.project_parameters()
@@ -2460,9 +2460,7 @@ class TestPostStepParameterProjection:
                     ):
                         check_parameter_orthogonality(model, module, step, tracker)
 
-        assert tracker.is_successful(), (
-            f"Multi-target orthogonality violated:\n{tracker.get_summary()}"
-        )
+        assert tracker.is_successful(), f"Multi-target orthogonality violated:\n{tracker.get_summary()}"
 
     def test_project_parameters_idempotent(self):
         """Test that project_parameters is idempotent (applying twice yields same result)."""
@@ -2507,9 +2505,7 @@ class TestPostStepParameterProjection:
 
         for n, p in model.named_parameters():
             if "S_low" in n:
-                assert torch.equal(p.data, s_low_before[n]), (
-                    f"project_parameters modified S_low: {n}"
-                )
+                assert torch.equal(p.data, s_low_before[n]), f"project_parameters modified S_low: {n}"
 
     def test_batched_param_projection_matches_unbatched(self, monkeypatch):
         """Distributed batched path must produce identical results to unbatched.
