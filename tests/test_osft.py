@@ -29,6 +29,7 @@ from mini_trainer.osft_utils import (
     is_osft_param,
     optim_wrapper,
     project_gradient_to_orthogonal_space,
+    project_parameter_to_orthogonal_space,
 )
 from mini_trainer.setup_model_for_training import setup_model
 from mini_trainer.training_types import TorchrunArgs, TrainingArgs
@@ -2201,6 +2202,359 @@ class TestLazyInitTokenizerAlignment:
         assert isinstance(model, DummyOSFT)
         assert align_mock.call_count == 1
         assert loaded_models and loaded_models[0].aligned is True
+
+
+class TestPostStepParameterProjection:
+    """Test post-step parameter re-projection to fix AdamW subspace leak.
+
+    AdamW's element-wise moment rescaling (m̂_t / √v̂_t) can rotate the
+    parameter update out of the orthogonal complement of the frozen
+    subspace, even when gradients are correctly projected beforehand.
+    The ``project_parameters`` method and updated ``optim_wrapper``
+    re-project parameters after each step to correct this.
+    """
+
+    def _create_simple_osft_model(self, hidden_size=16, rank_ratio=0.5):
+        """Create a simple model with OSFT for testing."""
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.linear = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.dtype = torch.float32
+                nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(SimpleModel)
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {"linear.weight": int(hidden_size * rank_ratio)}
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32,
+        )
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = rank_ratio
+        model.reinitialize_osft(decompose_existing_weights=True)
+        return model
+
+    def _create_multi_target_model(self):
+        """Create a model with multiple OSFT targets of different shapes."""
+
+        class MultiLinearModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.small = nn.Linear(8, 8, bias=False)
+                self.medium = nn.Linear(16, 8, bias=False)
+                self.large = nn.Linear(16, 16, bias=False)
+                self.dtype = torch.float32
+                for layer in [self.small, self.medium, self.large]:
+                    nn.init.normal_(layer.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(MultiLinearModel)
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {
+            "small.weight": 4,
+            "medium.weight": 4,
+            "large.weight": 8,
+        }
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float64,
+            output_dtype=torch.float64,
+        )
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = 0.5
+        model.reinitialize_osft(decompose_existing_weights=True)
+        return model
+
+    def test_project_parameters_basic(self):
+        """Test that project_parameters projects U_low and V_low correctly."""
+        model = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+
+        # Manually perturb U_low and V_low to have components in frozen subspace
+        for module in model.modules():
+            if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
+                U_high = module.osft_U_high
+                V_high = module.osft_V_high
+
+                # Add a component in the frozen subspace direction
+                with torch.no_grad():
+                    module.osft_params.U_low.data += U_high @ torch.randn(
+                        U_high.shape[1], module.osft_params.U_low.shape[1]
+                    )
+                    module.osft_params.V_low.data += (
+                        torch.randn(module.osft_params.V_low.shape[0], V_high.shape[0]) @ V_high
+                    )
+
+        # Now project parameters
+        model.project_parameters()
+
+        # Check that U_low and V_low are orthogonal to frozen subspace
+        for module in model.modules():
+            if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
+                U_high = module.osft_U_high
+                V_high = module.osft_V_high
+                U_low = module.osft_params.U_low
+                V_low = module.osft_params.V_low
+
+                # U_high^T @ U_low should be zero
+                u_overlap = torch.mm(U_high.transpose(0, 1), U_low.data)
+                assert torch.allclose(u_overlap, torch.zeros_like(u_overlap), atol=1e-5), (
+                    f"U_low not orthogonal to U_high after projection: max |U_high^T @ U_low| = {u_overlap.abs().max():.2e}"
+                )
+
+                # V_low @ V_high^T should be zero
+                v_overlap = torch.mm(V_low.data, V_high.transpose(0, 1))
+                assert torch.allclose(v_overlap, torch.zeros_like(v_overlap), atol=1e-5), (
+                    f"V_low not orthogonal to V_high after projection: max |V_low @ V_high^T| = {v_overlap.abs().max():.2e}"
+                )
+
+    def test_project_parameter_to_orthogonal_space_directly(self):
+        """Test project_parameter_to_orthogonal_space helper directly."""
+        torch.manual_seed(42)
+        N, M = 16, 16
+        k_high = 8
+        k_low = 8
+
+        # Create orthonormal U_high and V_high via QR
+        U_high = torch.linalg.qr(torch.randn(N, k_high))[0]
+        V_high = torch.linalg.qr(torch.randn(M, k_high))[0].T
+
+        # Create U_low and V_low with components in frozen subspace
+        U_low_data = torch.randn(N, k_low) + U_high @ torch.randn(k_high, k_low)
+        V_low_data = torch.randn(k_low, M) + torch.randn(k_low, k_high) @ V_high
+
+        U_low = nn.Parameter(U_low_data)
+        V_low = nn.Parameter(V_low_data)
+
+        svd_dict = {
+            "U_high": U_high,
+            "S_high": torch.ones(k_high),
+            "V_high": V_high,
+            "U_low": U_low,
+            "S_low": nn.Parameter(torch.ones(k_low)),
+            "V_low": V_low,
+            "rank_high": k_high,
+        }
+
+        project_parameter_to_orthogonal_space(svd_dict)
+
+        # Verify orthogonality (atol=1e-5 accounts for float32 accumulation)
+        u_overlap = torch.mm(U_high.T, U_low.data)
+        assert torch.allclose(u_overlap, torch.zeros_like(u_overlap), atol=1e-5), (
+            f"U_low not orthogonal: max |U_high^T @ U_low| = {u_overlap.abs().max():.2e}"
+        )
+
+        v_overlap = torch.mm(V_low.data, V_high.T)
+        assert torch.allclose(v_overlap, torch.zeros_like(v_overlap), atol=1e-5), (
+            f"V_low not orthogonal: max |V_low @ V_high^T| = {v_overlap.abs().max():.2e}"
+        )
+
+    def test_adamw_leak_fixed_over_many_steps(self):
+        """Stress test: verify orthogonality over 200 steps with aggressive LR.
+
+        This test would fail without post-step parameter re-projection
+        because AdamW's element-wise rescaling accumulates drift into the
+        frozen subspace over many steps.
+        """
+        torch.manual_seed(42)
+        model = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        model.train()
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        assert len(osft_params) > 0
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-2)
+        optim_wrapper(optimizer, model)
+
+        num_steps = 200
+        for step in range(1, num_steps + 1):
+            input_data = torch.randn(4, 16)
+            target = torch.randn(4, 16)
+
+            output = model.linear(input_data)
+            loss = torch.nn.functional.mse_loss(output, target)
+            loss.backward()
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+            # Check parameter orthogonality every 10 steps
+            if step % 10 == 0:
+                for module in model.modules():
+                    if (
+                        hasattr(module, "osft_params")
+                        and hasattr(module, "osft_U_high")
+                        and hasattr(module, "osft_S_high")
+                        and hasattr(module, "osft_V_high")
+                    ):
+                        check_parameter_orthogonality(model, module, step, tracker)
+
+        assert tracker.is_successful(), (
+            f"AdamW subspace leak detected after {num_steps} steps:\n{tracker.get_summary()}"
+        )
+
+    def test_optim_wrapper_calls_project_parameters(self):
+        """Test that the optim_wrapper calls project_parameters after step."""
+        model = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        model.train()
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-3)
+        optim_wrapper(optimizer, model)
+
+        # Track calls to project_parameters
+        calls = []
+        original_project_parameters = model.project_parameters
+
+        def tracking_project_parameters():
+            calls.append("project_parameters")
+            return original_project_parameters()
+
+        model.project_parameters = tracking_project_parameters
+
+        # Do a step
+        input_data = torch.randn(4, 16)
+        target = torch.randn(4, 16)
+        output = model.linear(input_data)
+        loss = torch.nn.functional.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+
+        assert "project_parameters" in calls, "optim_wrapper should call project_parameters after step"
+
+    def test_project_parameters_multi_target(self):
+        """Test post-step projection works with multiple OSFT targets."""
+        model = self._create_multi_target_model()
+        model.train()
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-2)
+        optim_wrapper(optimizer, model)
+
+        for step in range(1, 51):
+            x8 = torch.randn(2, 8, dtype=torch.float64)
+            x16 = torch.randn(2, 16, dtype=torch.float64)
+            loss = model.small(x8).pow(2).sum() + model.medium(x16).pow(2).sum() + model.large(x16).pow(2).sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            if step % 5 == 0:
+                for module in model.modules():
+                    if (
+                        hasattr(module, "osft_V_high")
+                        and hasattr(module, "osft_U_high")
+                        and hasattr(module, "osft_S_high")
+                    ):
+                        check_parameter_orthogonality(model, module, step, tracker)
+
+        assert tracker.is_successful(), f"Multi-target orthogonality violated:\n{tracker.get_summary()}"
+
+    def test_project_parameters_idempotent(self):
+        """Test that project_parameters is idempotent (applying twice yields same result)."""
+        model = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+
+        # Perturb parameters
+        for module in model.modules():
+            if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
+                with torch.no_grad():
+                    module.osft_params.U_low.data += module.osft_U_high @ torch.randn(
+                        module.osft_U_high.shape[1], module.osft_params.U_low.shape[1]
+                    )
+
+        # First projection
+        model.project_parameters()
+        first_state = {}
+        for n, p in model.named_parameters():
+            if "osft_params" in n:
+                first_state[n] = p.data.clone()
+
+        # Second projection (should be near-no-op; float32 accumulation
+        # introduces ~1e-6 residual, so we use atol=1e-5)
+        model.project_parameters()
+        for n, p in model.named_parameters():
+            if "osft_params" in n:
+                assert torch.allclose(p.data, first_state[n], atol=1e-5), (
+                    f"project_parameters is not idempotent for {n}: "
+                    f"max diff = {(p.data - first_state[n]).abs().max():.2e}"
+                )
+
+    def test_project_parameters_preserves_s_low(self):
+        """Test that project_parameters does not modify S_low."""
+        model = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+
+        # Save S_low values
+        s_low_before = {}
+        for n, p in model.named_parameters():
+            if "S_low" in n:
+                s_low_before[n] = p.data.clone()
+
+        model.project_parameters()
+
+        for n, p in model.named_parameters():
+            if "S_low" in n:
+                assert torch.equal(p.data, s_low_before[n]), f"project_parameters modified S_low: {n}"
+
+    def test_batched_param_projection_matches_unbatched(self, monkeypatch):
+        """Distributed batched path must produce identical results to unbatched.
+
+        Mirrors TestBatchedUAllReduce.test_batched_path_matches_unbatched
+        but for parameter projection instead of gradient projection.
+        """
+        import torch.distributed as dist
+
+        torch.manual_seed(99)
+        model_ref = self._create_multi_target_model()
+
+        torch.manual_seed(99)
+        model_bat = self._create_multi_target_model()
+
+        # Perturb both identically
+        torch.manual_seed(42)
+        for module in model_ref.modules():
+            if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
+                perturbation_u = torch.randn_like(module.osft_params.U_low.data) * 0.1
+                perturbation_v = torch.randn_like(module.osft_params.V_low.data) * 0.1
+                with torch.no_grad():
+                    module.osft_params.U_low.data += perturbation_u
+                    module.osft_params.V_low.data += perturbation_v
+
+        torch.manual_seed(42)
+        for module in model_bat.modules():
+            if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
+                perturbation_u = torch.randn_like(module.osft_params.U_low.data) * 0.1
+                perturbation_v = torch.randn_like(module.osft_params.V_low.data) * 0.1
+                with torch.no_grad():
+                    module.osft_params.U_low.data += perturbation_u
+                    module.osft_params.V_low.data += perturbation_v
+
+        # Reference: unbatched (non-distributed) path
+        model_ref.project_parameters()
+
+        # Batched: mock dist to force batched path
+        monkeypatch.setattr(dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+        monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None: None)
+        model_bat.project_parameters()
+
+        # Compare every parameter
+        for (n_ref, p_ref), (n_bat, p_bat) in zip(model_ref.named_parameters(), model_bat.named_parameters()):
+            assert n_ref == n_bat
+            assert torch.equal(p_ref.data, p_bat.data), (
+                f"Parameter mismatch on {n_ref}: max |diff| = {(p_ref.data - p_bat.data).abs().max():.2e}"
+            )
 
 
 if __name__ == "__main__":

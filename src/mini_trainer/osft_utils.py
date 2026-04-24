@@ -158,6 +158,8 @@ class OSFTModelProtocol(Protocol):
 
     def project_gradients(self) -> None: ...
 
+    def project_parameters(self) -> None: ...
+
     def _reconstruct_weight_by_safe_name(
         self,
         safe_name: str,
@@ -393,6 +395,7 @@ def is_osft_model(model: torch.nn.Module) -> bool:
         "osft_config",
         "osft_params",
         "project_gradients",
+        "project_parameters",
         "reinitialize_osft",
     ]
     return all(hasattr(model, attr) for attr in required_attrs)
@@ -533,6 +536,115 @@ def reconstruct_weight_matrix(
     if output_dtype:
         reconstructed = reconstructed.to(output_dtype)
     return reconstructed
+
+
+def project_parameter_to_orthogonal_space(
+    svd_dict: SVDDecompositionDict,
+    *,
+    skip_u: bool = False,
+    cache_holder: "nn.Module | None" = None,
+):
+    """
+    Projects the parameter values of U_low and V_low so they remain
+    orthogonal to the frozen high-rank subspace.
+
+    This is the parameter-space counterpart of
+    ``project_gradient_to_orthogonal_space``.  While the gradient
+    projection keeps the optimizer's moment estimates clean, AdamW's
+    element-wise rescaling (m̂_t / √v̂_t) can rotate the resulting
+    parameter update out of the allowed subspace.  Applying this
+    projection *after* each optimizer step guarantees that U_low and
+    V_low never drift into the frozen subspace.
+
+    Both projections use the factored form:
+      U_low -= U_high @ (U_high^T @ U_low)
+      V_low -= (V_low @ V_high^T) @ V_high
+
+    The distributed logic (FSDP2 sharding, all-reduce for U, all-gather
+    for V, V_high caching) mirrors the gradient projection exactly.
+
+    Args:
+        svd_dict: Dictionary containing the SVD decomposition components.
+        skip_u: If True, skip U projection (caller handles it externally,
+            e.g. via batched all-reduce in distributed mode).
+        cache_holder: Optional module on which to cache the all-gathered
+            V_high.  V_high is frozen, so the cache is exact.
+    """
+    U_high = svd_dict["U_high"]
+    V_high = svd_dict["V_high"]
+
+    # Project U_low parameters to space orthogonal to U_high
+    if not skip_u:
+        U_low = svd_dict["U_low"]
+        local_U_high = getattr(U_high, "to_local", lambda: U_high)()
+        local_U_low = getattr(U_low.data, "to_local", lambda: U_low.data)()
+
+        proj_coeff = torch.mm(local_U_high.transpose(0, 1), local_U_low)
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(proj_coeff, op=dist.ReduceOp.SUM)
+        local_U_low.addmm_(local_U_high, proj_coeff, alpha=-1.0)
+
+        if hasattr(U_low.data, "_local_tensor"):
+            U_low.data._local_tensor.copy_(local_U_low)
+        else:
+            U_low.data.copy_(local_U_low)
+
+    # Project V_low parameters: V_low -= (V_low @ V_high^T) @ V_high
+    V_low = svd_dict["V_low"]
+    local_V_high = getattr(V_high, "to_local", lambda: V_high)()
+    local_V_low = getattr(V_low.data, "to_local", lambda: V_low.data)()
+
+    # Reuse cached all-gathered V_high when available (same logic as gradient projection)
+    can_cache = OSFT_CACHE_V and cache_holder is not None
+    cached = getattr(cache_holder, "_osft_v_high_full", None) if can_cache else None
+
+    if cached is not None:
+        V_high_full = cached
+    else:
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            full_k_high = svd_dict["rank_high"]
+            if local_V_high.shape[0] < full_k_high:
+                world_size = dist.get_world_size()
+                remainder = full_k_high % world_size
+                if remainder == 0:
+                    V_high_full = torch.empty(
+                        full_k_high,
+                        local_V_high.shape[1],
+                        dtype=local_V_high.dtype,
+                        device=local_V_high.device,
+                    )
+                    dist.all_gather_into_tensor(V_high_full, local_V_high)
+                else:
+                    rows_per_rank = math.ceil(full_k_high / world_size)
+                    padded = torch.zeros(
+                        rows_per_rank,
+                        local_V_high.shape[1],
+                        dtype=local_V_high.dtype,
+                        device=local_V_high.device,
+                    )
+                    padded[: local_V_high.shape[0]].copy_(local_V_high)
+                    gathered = torch.empty(
+                        rows_per_rank * world_size,
+                        local_V_high.shape[1],
+                        dtype=local_V_high.dtype,
+                        device=local_V_high.device,
+                    )
+                    dist.all_gather_into_tensor(gathered, padded)
+                    V_high_full = gathered[:full_k_high]
+            else:
+                V_high_full = local_V_high
+        else:
+            V_high_full = local_V_high
+        if can_cache:
+            cache_holder._osft_v_high_full = V_high_full.detach()
+
+    coeff = torch.mm(local_V_low, V_high_full.transpose(0, 1))
+    local_V_low.addmm_(coeff, V_high_full, alpha=-1.0)
+
+    if hasattr(V_low.data, "_local_tensor"):
+        V_low.data._local_tensor.copy_(local_V_low)
+    else:
+        V_low.data.copy_(local_V_low)
 
 
 def project_gradient_to_orthogonal_space(
@@ -2226,6 +2338,100 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     f"Set OSFT_CACHE_V=0 to disable."
                 )
 
+        @torch.no_grad()
+        def project_parameters(self):
+            """
+            Projects U_low and V_low parameter values back into the orthogonal
+            complement of the frozen high-rank subspace.
+
+            This must be called **after** each ``optimizer.step()`` to correct
+            for the fact that AdamW's element-wise moment rescaling can rotate
+            the parameter update out of the allowed subspace.  The pre-step
+            gradient projection (``project_gradients``) keeps the moment
+            estimates cleaner, but only this post-step projection guarantees
+            that U_low and V_low never accumulate components in the frozen
+            subspace.
+
+            The distributed strategy mirrors ``project_gradients``: U
+            projection coefficients are batched into a single all-reduce,
+            and V projections use the factored per-module all-gather (with
+            optional caching via ``OSFT_CACHE_V``).
+            """
+            is_distributed = dist.is_initialized() and dist.get_world_size() > 1
+
+            # Collect OSFT modules
+            osft_modules = []
+            for module in self.modules():
+                if (
+                    hasattr(module, "osft_params")
+                    and hasattr(module, "osft_U_high")
+                    and hasattr(module, "osft_S_high")
+                    and hasattr(module, "osft_V_high")
+                ):
+                    osft_modules.append(module)
+
+            if not osft_modules:
+                return
+
+            # Non-distributed: project each module individually
+            if not is_distributed:
+                for module in osft_modules:
+                    try:
+                        svd_dict = self.get_svd_dict_for_module(module)
+                    except ValueError as err:
+                        raise ValueError(f"error in projecting parameters for module: {module}") from err
+                    project_parameter_to_orthogonal_space(svd_dict, cache_holder=module)
+                return
+
+            # Distributed: batch U projection all-reduces (same strategy as project_gradients).
+            u_work = []
+            u_flat_parts = []
+            svd_dicts = []
+            svd_modules = []
+
+            for module in osft_modules:
+                try:
+                    svd_dict = self.get_svd_dict_for_module(module)
+                except ValueError as err:
+                    raise ValueError(f"error in projecting parameters for module: {module}") from err
+                svd_dicts.append(svd_dict)
+                svd_modules.append(module)
+
+                U_low = svd_dict["U_low"]
+                U_high = svd_dict["U_high"]
+                local_U_high = getattr(U_high, "to_local", lambda x=U_high: x)()
+                local_U_low = getattr(U_low.data, "to_local", lambda x=U_low.data: x)()
+
+                proj_coeff = torch.mm(local_U_high.transpose(0, 1), local_U_low)
+                u_work.append((local_U_high, local_U_low, U_low, proj_coeff.shape))
+                u_flat_parts.append(proj_coeff.flatten())
+
+            # Single batched all-reduce for all U coefficients
+            if u_flat_parts:
+                batched = torch.cat(u_flat_parts)
+                dist.all_reduce(batched, op=dist.ReduceOp.SUM)
+
+                offset = 0
+                for local_U_high, local_U_low, U_low, coeff_shape in u_work:
+                    numel = coeff_shape[0] * coeff_shape[1]
+                    proj_coeff = batched[offset : offset + numel].reshape(coeff_shape)
+                    offset += numel
+
+                    local_U_low.addmm_(local_U_high, proj_coeff, alpha=-1.0)
+
+                    if hasattr(U_low.data, "_local_tensor"):
+                        U_low.data._local_tensor.copy_(local_U_low)
+                    else:
+                        U_low.data.copy_(local_U_low)
+
+                assert offset == batched.numel(), (
+                    f"Batch split consumed {offset} elements but tensor has {batched.numel()}"
+                )
+
+            # V projections: per-module factored V all-gather (skip_u=True).
+            for svd_dict, module in zip(svd_dicts, svd_modules):
+                project_parameter_to_orthogonal_space(svd_dict, skip_u=True, cache_holder=module)
+
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""
             log_rank_0("Reconstructing OSFT weights for checkpoint saving...")
@@ -2276,7 +2482,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
 
 def optim_wrapper(optimizer, model):
-    """Wrap optimizer.step to project gradients before each update."""
+    """Wrap optimizer.step to project gradients before and parameters after each update.
+
+    Pre-step gradient projection keeps the optimizer's moment estimates in the
+    correct subspace.  Post-step parameter projection corrects for the fact
+    that AdamW's element-wise rescaling (m̂_t / √v̂_t) can rotate the update
+    out of the orthogonal complement of the frozen subspace.
+    """
     if not hasattr(model, "project_gradients"):
         return optimizer
 
@@ -2284,7 +2496,10 @@ def optim_wrapper(optimizer, model):
 
     def step(self, *args, **kwargs):
         model.project_gradients()
-        return orig_step(*args, **kwargs)
+        result = orig_step(*args, **kwargs)
+        if hasattr(model, "project_parameters"):
+            model.project_parameters()
+        return result
 
     optimizer.step = types.MethodType(step, optimizer)
     return optimizer
