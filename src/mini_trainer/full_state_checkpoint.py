@@ -40,7 +40,7 @@ _CHECKPOINT_SIGNALS = (
     signal.SIGQUIT,
 )
 
-_DEFAULT_TRIGGER_PATH = f'/dev/shm/{os.environ.get("CHECKPOINT_TRIGGER_FILENAME", "checkpoint_requested")}'
+_DEFAULT_TRIGGER_PATH = f"/dev/shm/{os.environ.get('CHECKPOINT_TRIGGER_FILENAME', 'checkpoint_requested')}"
 
 
 class FullStateCheckpointer:
