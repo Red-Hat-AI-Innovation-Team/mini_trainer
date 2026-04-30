@@ -105,7 +105,7 @@ MODELS = {
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(_REPO_ROOT, ".test_artifacts", "messages_data.jsonl")
 BASE_OUTPUT = os.path.join(_REPO_ROOT, ".test_artifacts", "runs")
-TRIGGER_FILE = "/dev/shm/mini_trainer_checkpoint_trigger"
+TRIGGER_FILE = "/dev/shm/checkpoint_requested"
 NUM_GPUS = 8
 
 

@@ -11,6 +11,7 @@ all_reduce(MAX) to ensure all ranks agree.
 """
 
 import logging
+import os
 import random
 import signal
 from pathlib import Path
@@ -39,7 +40,7 @@ _CHECKPOINT_SIGNALS = (
     signal.SIGQUIT,
 )
 
-_DEFAULT_TRIGGER_PATH = "/dev/shm/mini_trainer_checkpoint_trigger"
+_DEFAULT_TRIGGER_PATH = f'/dev/shm/{os.environ.get("CHECKPOINT_TRIGGER_FILENAME", "checkpoint_requested")}'
 
 
 class FullStateCheckpointer:
