@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from mini_trainer.full_state_checkpoint import find_latest_full_state_checkpoint
 from mini_trainer.training_types import TrainingArgs
 
 
@@ -297,3 +298,42 @@ class TestFullStateCheckpointerLoad:
         save_dir.mkdir()
         with pytest.raises(FileNotFoundError):
             FullStateCheckpointer.load_rng_states(save_dir, rank=99)
+
+
+class TestFindLatestFullStateCheckpoint:
+    def _make_checkpoint(self, base_dir, step):
+        step_dir = base_dir / "full_state_checkpoints" / f"step_{step}"
+        step_dir.mkdir(parents=True)
+        torch.save({"step": step}, step_dir / "training_state.pt")
+        return step_dir
+
+    def test_returns_none_when_no_checkpoint_dir(self, tmp_path):
+        assert find_latest_full_state_checkpoint(tmp_path) is None
+
+    def test_returns_none_when_empty_checkpoint_dir(self, tmp_path):
+        (tmp_path / "full_state_checkpoints").mkdir()
+        assert find_latest_full_state_checkpoint(tmp_path) is None
+
+    def test_finds_single_checkpoint(self, tmp_path):
+        step_dir = self._make_checkpoint(tmp_path, 10)
+        assert find_latest_full_state_checkpoint(tmp_path) == str(step_dir)
+
+    def test_finds_latest_among_multiple(self, tmp_path):
+        self._make_checkpoint(tmp_path, 5)
+        self._make_checkpoint(tmp_path, 20)
+        self._make_checkpoint(tmp_path, 10)
+        result = find_latest_full_state_checkpoint(tmp_path)
+        assert result.endswith("step_20")
+
+    def test_skips_incomplete_checkpoints(self, tmp_path):
+        valid = self._make_checkpoint(tmp_path, 5)
+        incomplete = tmp_path / "full_state_checkpoints" / "step_100"
+        incomplete.mkdir(parents=True)
+        assert find_latest_full_state_checkpoint(tmp_path) == str(valid)
+
+    def test_skips_non_step_directories(self, tmp_path):
+        valid = self._make_checkpoint(tmp_path, 10)
+        other = tmp_path / "full_state_checkpoints" / "not_a_step"
+        other.mkdir(parents=True)
+        torch.save({}, other / "training_state.pt")
+        assert find_latest_full_state_checkpoint(tmp_path) == str(valid)
