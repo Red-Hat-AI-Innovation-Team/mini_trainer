@@ -48,14 +48,17 @@ def find_latest_full_state_checkpoint(output_dir: str | Path) -> str | None:
     ckpt_dir = Path(output_dir) / "full_state_checkpoints"
     if not ckpt_dir.is_dir():
         return None
-    step_dirs = [
-        d
-        for d in ckpt_dir.iterdir()
-        if d.is_dir() and d.name.startswith("step_") and (d / "training_state.pt").exists()
-    ]
+    step_dirs: list[tuple[int, Path]] = []
+    for d in ckpt_dir.iterdir():
+        if not (d.is_dir() and d.name.startswith("step_") and (d / "training_state.pt").exists()):
+            continue
+        step_suffix = d.name.removeprefix("step_")
+        if not step_suffix.isdigit():
+            continue
+        step_dirs.append((int(step_suffix), d))
     if not step_dirs:
         return None
-    latest = max(step_dirs, key=lambda d: int(d.name.split("_")[1]))
+    latest = max(step_dirs, key=lambda item: item[0])[1]
     return str(latest)
 
 

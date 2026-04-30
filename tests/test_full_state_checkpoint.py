@@ -337,3 +337,10 @@ class TestFindLatestFullStateCheckpoint:
         other.mkdir(parents=True)
         torch.save({}, other / "training_state.pt")
         assert find_latest_full_state_checkpoint(tmp_path) == str(valid)
+
+    def test_skips_non_numeric_step_suffix(self, tmp_path):
+        valid = self._make_checkpoint(tmp_path, 7)
+        malformed = tmp_path / "full_state_checkpoints" / "step_latest"
+        malformed.mkdir(parents=True)
+        torch.save({}, malformed / "training_state.pt")
+        assert find_latest_full_state_checkpoint(tmp_path) == str(valid)
