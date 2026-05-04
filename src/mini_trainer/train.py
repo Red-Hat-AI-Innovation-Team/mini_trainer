@@ -17,7 +17,7 @@ from typer import Option, Typer
 from mini_trainer import mlflow_wrapper, wandb_wrapper
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer.batch_metrics import BatchMetrics
-from mini_trainer.full_state_checkpoint import FullStateCheckpointer
+from mini_trainer.full_state_checkpoint import FullStateCheckpointer, find_latest_full_state_checkpoint
 from mini_trainer.sampler import get_data_loader
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.training_types import PretrainingConfig, TrainingMode
@@ -1310,6 +1310,12 @@ def main(
     # at this point
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    if on_demand_checkpointing and resume_from_full_state_checkpoint is None:
+        detected = find_latest_full_state_checkpoint(output_dir)
+        if detected:
+            resume_from_full_state_checkpoint = detected
+            log_rank_0(f"Auto-detected full-state checkpoint: {detected}")
 
     # validation, do this before continuing execution flow so we don't log experiments that are invalid from
     # the get-go
