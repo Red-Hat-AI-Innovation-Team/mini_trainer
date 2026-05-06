@@ -167,6 +167,9 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         command.append(f"--min-samples-per-checkpoint={train_args.min_samples_per_checkpoint}")
 
     # Add optional boolean flags
+    if train_args.compile_model:
+        command.append("--compile-model")
+
     if train_args.use_liger_kernels:
         command.append("--use-liger-kernels")
 

@@ -1283,6 +1283,7 @@ def main(
     beta2: Annotated[float, Option(help="AdamW beta2 parameter (RMSprop coefficient)")] = 0.95,
     eps: Annotated[float, Option(help="AdamW epsilon for numerical stability")] = 1e-8,
     weight_decay: Annotated[float, Option(help="AdamW weight decay (L2 penalty)")] = 0.0,
+    compile_model: Annotated[bool, Option(help="Compile transformer blocks with torch.compile")] = False,
     use_liger_kernels: Annotated[bool, Option(help="Whether to use Liger kernels")] = False,
     osft: Annotated[bool, Option(help="Enable OSFT (Orthogonal Subspace Fine-Tuning)")] = False,
     osft_unfreeze_rank_ratio: Annotated[
@@ -1406,6 +1407,12 @@ def main(
 
     # validation, do this before continuing execution flow so we don't log experiments that are invalid from
     # the get-go
+    if compile_model and osft:
+        raise ValueError(
+            "--compile-model is not compatible with --osft. "
+            "OSFT uses dynamic forward methods that cannot be traced by torch.compile."
+        )
+
     if osft:
         if osft_unfreeze_rank_ratio is None:
             raise ValueError("osft_unfreeze_rank_ratio is required when osft is True")
@@ -1613,6 +1620,7 @@ def main(
         eps=eps,
         weight_decay=weight_decay,
         resume_from_checkpoint=resume_from_full_state_checkpoint,
+        compile_model=compile_model,
     )
 
     # Reconstruct callbacks from serialized CLI arg
