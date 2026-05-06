@@ -1413,6 +1413,12 @@ def main(
             "OSFT uses dynamic forward methods that cannot be traced by torch.compile."
         )
 
+    if compile_model and use_liger_kernels:
+        raise ValueError(
+            "--compile-model is not compatible with --use-liger-kernels. "
+            "Both replace the same memory-bound ops; the interaction is untested."
+        )
+
     if osft:
         if osft_unfreeze_rank_ratio is None:
             raise ValueError("osft_unfreeze_rank_ratio is required when osft is True")
@@ -1570,6 +1576,15 @@ def main(
                             )
                             model.resize_token_embeddings(ckpt_embed_size)
                     break
+
+    if compile_model:
+        moe_classes = ("MixtralForCausalLM", "GraniteMoeHybridForCausalLM")
+        if model.__class__.__name__ in moe_classes:
+            raise ValueError(
+                f"--compile-model is not compatible with MoE architecture {model.__class__.__name__}. "
+                "MoE router logic causes graph breaks with fullgraph=True."
+            )
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
 
     # Create PretrainingConfig if block_size is provided
     pretraining_config = None
