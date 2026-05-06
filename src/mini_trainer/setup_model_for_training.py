@@ -484,14 +484,6 @@ def wrap_fsdp2(model: torch.nn.Module, compile_model: bool = False) -> torch.nn.
 
     # Apply torch.compile to each block (after AC, before FSDP2)
     if compile_model:
-        class_name = model.__class__.__name__
-        moe_classes = ("MixtralForCausalLM", "GraniteMoeHybridForCausalLM")
-        if class_name in moe_classes:
-            raise ValueError(
-                f"--compile-model is not compatible with MoE architecture {class_name}. "
-                "MoE router logic causes graph breaks with fullgraph=True."
-            )
-        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
         log_rank_0(f"🔄 [Phase 2] Compiling {len(layers)} transformer blocks with torch.compile")
         for idx, block in enumerate(layers):
             layers[idx] = torch.compile(block, backend="inductor", fullgraph=True)
