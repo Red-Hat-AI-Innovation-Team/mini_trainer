@@ -1584,7 +1584,9 @@ def main(
                 f"--compile-model is not compatible with MoE architecture {model.__class__.__name__}. "
                 "MoE router logic causes graph breaks with fullgraph=True."
             )
-        # Without this, AC's RNG side effects cause a graph break under compile.
+        # Defensive: not required on current PyTorch but may be needed on
+        # future versions where AC's RNG side effects cause graph breaks.
+        # See test_compile_works_without_dynamo_config_flag.
         torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
 
     # Create PretrainingConfig if block_size is provided
