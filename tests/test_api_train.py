@@ -748,6 +748,7 @@ sys.exit(1)
                 max_tokens_per_gpu=1000,
                 learning_rate=1e-5,
                 output_dir=tmpdir,
+                compile_model=True,
                 use_liger_kernels=True,
                 checkpoint_at_epoch=True,
                 save_final_checkpoint=True,
@@ -767,6 +768,7 @@ sys.exit(1)
                 _, command = call_args[0]
 
                 # Verify all boolean flags are present
+                assert "--compile-model" in command
                 assert "--use-liger-kernels" in command
                 assert "--osft" in command
                 assert "--checkpoint-at-epoch" in command
@@ -783,6 +785,7 @@ sys.exit(1)
                 max_tokens_per_gpu=1000,
                 learning_rate=1e-5,
                 output_dir=tmpdir,
+                compile_model=False,
                 use_liger_kernels=False,
                 osft=False,
                 checkpoint_at_epoch=False,
@@ -800,6 +803,7 @@ sys.exit(1)
                 _, command = call_args[0]
 
                 # Verify boolean flags are NOT present when False
+                assert "--compile-model" not in command
                 assert "--use-liger-kernels" not in command
                 assert "--osft" not in command
                 assert "--checkpoint-at-epoch" not in command
