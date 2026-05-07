@@ -486,7 +486,7 @@ def wrap_fsdp2(model: torch.nn.Module, compile_model: bool = False) -> torch.nn.
     if compile_model:
         log_rank_0(f"🔄 [Phase 2] Compiling {len(layers)} transformer blocks with torch.compile")
         for idx, block in enumerate(layers):
-            layers[idx] = torch.compile(block, backend="inductor", fullgraph=True)
+            layers[idx] = torch.compile(block, fullgraph=True, dynamic=True)
 
     # Build 1D device mesh over all ranks
     world_size = dist.get_world_size()
