@@ -427,6 +427,8 @@ def wrap_fsdp2(model: torch.nn.Module, compile_model: bool = False) -> torch.nn.
 
     Args:
         model: Model to wrap with FSDP2 (should already have buffers materialized)
+        compile_model: If True, compile each transformer block with torch.compile
+            (fullgraph=True, dynamic=True) between AC wrapping and FSDP2 sharding.
 
     Returns:
         FSDP2-wrapped model
