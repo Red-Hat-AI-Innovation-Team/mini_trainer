@@ -913,7 +913,7 @@ def _load_model_memory_efficient(
     model_args: tuple,
     base_kwargs: dict,
     osft_class_kwargs: dict,
-    train_dtype: "torch.dtype | None" = None,
+    train_dtype: torch.dtype | None = None,
 ):
     """
     Memory-efficient loading for OSFT models to avoid CUDA/CPU OOM.

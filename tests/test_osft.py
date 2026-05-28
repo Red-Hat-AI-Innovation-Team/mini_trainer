@@ -2204,6 +2204,110 @@ class TestLazyInitTokenizerAlignment:
         assert align_mock.call_count == 1
         assert loaded_models and loaded_models[0].aligned is True
 
+    def test_memory_efficient_loading_fallback_when_train_dtype_is_none(self, monkeypatch):
+        """When train_dtype is None, load_dtype should fall back to base_kwargs['torch_dtype']."""
+
+        class DummyLoadedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = MagicMock()
+                self.config.vocab_size = 10
+                self.aligned = False
+
+            def state_dict(self):
+                return {"weight": torch.zeros(1)}
+
+            def named_buffers(self):
+                return [("buffer", torch.zeros(1))]
+
+        captured_kwargs = {}
+
+        class DummyBase(nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):
+                captured_kwargs.update(kwargs)
+                return DummyLoadedModel()
+
+        class DummyOSFT(DummyBase):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self._lazy_init_pending = True
+
+        monkeypatch.setattr(osft_module.dist, "is_available", lambda: True)
+        monkeypatch.setattr(osft_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(osft_module.dist, "get_rank", lambda: 0)
+        monkeypatch.setattr(osft_module.dist, "barrier", lambda: None)
+        monkeypatch.setattr(osft_module.dist, "broadcast_object_list", lambda *_, **__: None)
+        monkeypatch.setattr(osft_module.torch.cuda, "is_available", lambda: False)
+
+        model = _load_model_memory_efficient(
+            actual_osft_cls=DummyOSFT,
+            pretrained_model_name_or_path="dummy",
+            model_args=tuple(),
+            base_kwargs={"torch_dtype": torch.bfloat16},
+            osft_class_kwargs={},
+            train_dtype=None,
+        )
+
+        assert isinstance(model, DummyOSFT)
+        assert captured_kwargs["torch_dtype"] == torch.bfloat16
+
+    def test_memory_efficient_loading_train_dtype_overrides_base_kwargs(self, monkeypatch):
+        """When train_dtype differs from base_kwargs['torch_dtype'], train_dtype takes precedence."""
+
+        class DummyLoadedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = MagicMock()
+                self.config.vocab_size = 10
+                self.aligned = False
+
+            def state_dict(self):
+                return {"weight": torch.zeros(1)}
+
+            def named_buffers(self):
+                return [("buffer", torch.zeros(1))]
+
+        captured_kwargs = {}
+
+        class DummyBase(nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):
+                captured_kwargs.update(kwargs)
+                return DummyLoadedModel()
+
+        class DummyOSFT(DummyBase):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self._lazy_init_pending = True
+
+        monkeypatch.setattr(osft_module.dist, "is_available", lambda: True)
+        monkeypatch.setattr(osft_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(osft_module.dist, "get_rank", lambda: 0)
+        monkeypatch.setattr(osft_module.dist, "barrier", lambda: None)
+        monkeypatch.setattr(osft_module.dist, "broadcast_object_list", lambda *_, **__: None)
+        monkeypatch.setattr(osft_module.torch.cuda, "is_available", lambda: False)
+
+        model = _load_model_memory_efficient(
+            actual_osft_cls=DummyOSFT,
+            pretrained_model_name_or_path="dummy",
+            model_args=tuple(),
+            base_kwargs={"torch_dtype": torch.float32},
+            osft_class_kwargs={},
+            train_dtype=torch.bfloat16,
+        )
+
+        assert isinstance(model, DummyOSFT)
+        assert captured_kwargs["torch_dtype"] == torch.bfloat16
+
 
 class TestPostStepParameterProjection:
     """Test post-step parameter re-projection to fix AdamW subspace leak.
