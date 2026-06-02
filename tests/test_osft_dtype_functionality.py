@@ -300,14 +300,13 @@ class TestOSFTModelDtypeIntegration:
             osft=True,
             local_rank=0,
             osft_upcast_dtype=torch.float32,
-            osft_output_dtype=torch.bfloat16,
             osft_rank_ratio=0.5,
         )
 
         # Verify the attributes were set correctly on the returned model
         assert result is mock_osft_model
         assert result.upcast_dtype == torch.float32
-        assert result.output_dtype == torch.bfloat16
+        assert result.output_dtype == torch.float32
 
         # Verify the OSFT model was created from the base model class
         mock_create_osft.assert_called_once_with(MockBaseModelClass)
@@ -369,7 +368,6 @@ class TestOSFTParameterFlow:
                     osft=True,
                     osft_unfreeze_rank_ratio=0.5,
                     osft_upcast_dtype="bfloat16",
-                    osft_output_dtype="float16",
                 )
             except SystemExit:
                 pass
@@ -379,7 +377,6 @@ class TestOSFTParameterFlow:
             call_kwargs = mock_setup_model.call_args.kwargs
 
             assert call_kwargs["osft_upcast_dtype"] == torch.bfloat16
-            assert call_kwargs["osft_output_dtype"] == torch.float16
 
 
 class TestOSFTDtypeEdgeCases:

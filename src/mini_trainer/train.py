@@ -1217,12 +1217,6 @@ def main(
         str | None,
         Option(help="Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."),
     ] = "float32",
-    osft_output_dtype: Annotated[
-        str | None,
-        Option(
-            help="Output dtype for OSFT. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc."
-        ),
-    ] = None,
     output_dir: Annotated[str, Option(help="Directory to save checkpoints and logs (required)")] = ...,
     min_samples_per_checkpoint: Annotated[
         int | None,
@@ -1335,7 +1329,6 @@ def main(
 
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
-    osft_output_dtype_torch = parse_dtype(osft_output_dtype)
     train_dtype_torch = parse_dtype(train_dtype)
 
     # Initialize logging flags
@@ -1362,7 +1355,6 @@ def main(
             "osft_unfreeze_rank_ratio": osft_unfreeze_rank_ratio,
             "osft_target_patterns": osft_target_patterns,
             "osft_upcast_dtype": osft_upcast_dtype,
-            "osft_output_dtype": osft_output_dtype,
             "trust_remote_code": trust_remote_code,
             "output_dir": output_dir,
             "min_samples_per_checkpoint": min_samples_per_checkpoint,
@@ -1446,7 +1438,6 @@ def main(
         osft_rank_ratio=osft_rank_ratio,
         osft_target_patterns=osft_target_patterns,
         osft_upcast_dtype=osft_upcast_dtype_torch,
-        osft_output_dtype=osft_output_dtype_torch,
         trust_remote_code=trust_remote_code,
     )
 

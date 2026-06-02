@@ -778,7 +778,6 @@ def setup_osft_model_distributed(
     osft_rank_ratio=None,
     osft_target_patterns=None,
     osft_upcast_dtype=torch.float32,
-    osft_output_dtype=None,
 ):
     """
     Initialize an OSFT model for distributed training with memory-efficient loading.
@@ -798,7 +797,6 @@ def setup_osft_model_distributed(
         osft_rank_ratio: Ratio for OSFT rank selection
         osft_target_patterns: Patterns for selecting OSFT target parameters
         osft_upcast_dtype: Dtype for OSFT computations
-        osft_output_dtype: Dtype for OSFT outputs
 
     Returns:
         OSFT model ready for FSDP2 wrapping
@@ -977,7 +975,6 @@ def setup_model(
     save_dtype: str | torch.dtype | None = None,
     train_dtype: torch.dtype = torch.float32,
     osft_upcast_dtype: torch.dtype = torch.float32,
-    osft_output_dtype: torch.dtype | None = None,
     osft_rank_ratio: float | None = None,
     osft_target_patterns: list[str] | None = None,
     use_liger_kernels: bool = False,
@@ -1145,8 +1142,6 @@ def setup_model(
     def load_osft_model():
         """Load a model with OSFT (Orthogonal Subspace Fine-Tuning) support."""
         log_rank_0("loading OSFT model")
-        # If osft_output_dtype is not specified, use train_dtype for consistency
-        effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
 
         # We monkey-patch the HF model class OSFT will wrap ahead of time so that liger can be properly loaded.
         # This is necessary because OSFT has to set up the model in a very specfic way which is incompatible with the
@@ -1185,7 +1180,6 @@ def setup_model(
                 osft_rank_ratio=osft_rank_ratio,
                 osft_target_patterns=osft_target_patterns,
                 osft_upcast_dtype=osft_upcast_dtype,
-                osft_output_dtype=effective_osft_output_dtype,
             )
         else:
             # non-distributed path: direct OSFT model creation
@@ -1210,7 +1204,7 @@ def setup_model(
 
         # final configuration
         model = align_model_and_tokenizer(model, tokenizer)
-        _set_osft_dtypes(model, osft_upcast_dtype, effective_osft_output_dtype)
+        _set_osft_dtypes(model, osft_upcast_dtype, train_dtype)
 
         log_rank_0("OSFT model loaded successfully")
         return model

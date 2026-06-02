@@ -1082,18 +1082,17 @@ def _build_osft_kwargs(osft_rank_ratio, osft_target_patterns):
     return osft_kwargs
 
 
-def _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype):
+def _set_osft_dtypes(model, osft_upcast_dtype, train_dtype):
     """
     Set OSFT dtype attributes on model for computation precision control.
 
     Args:
         model: The OSFT model to configure
         osft_upcast_dtype: Upcast dtype for computations
-        osft_output_dtype: Output dtype for results
+        train_dtype: Training dtype, used as the output dtype for OSFT results
     """
     model.upcast_dtype = osft_upcast_dtype
-    if osft_output_dtype:
-        model.output_dtype = osft_output_dtype
+    model.output_dtype = train_dtype
 
 
 def create_osft_model_class(base_cls) -> type[OSFTModel]:
