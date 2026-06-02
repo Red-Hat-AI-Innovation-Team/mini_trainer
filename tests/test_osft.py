@@ -2197,6 +2197,7 @@ class TestLazyInitTokenizerAlignment:
             model_args=tuple(),
             base_kwargs={"torch_dtype": torch.float32},
             osft_class_kwargs={"lazy_init_tokenizer_align_fn": align_mock},
+            train_dtype=torch.float32,
         )
 
         assert isinstance(model, DummyOSFT)
