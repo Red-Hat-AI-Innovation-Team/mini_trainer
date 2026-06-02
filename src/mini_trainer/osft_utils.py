@@ -913,6 +913,7 @@ def _load_model_memory_efficient(
     model_args: tuple,
     base_kwargs: dict,
     osft_class_kwargs: dict,
+    train_dtype: torch.dtype | None = None,
 ):
     """
     Memory-efficient loading for OSFT models to avoid CUDA/CPU OOM.
@@ -927,8 +928,8 @@ def _load_model_memory_efficient(
         pretrained_model_name_or_path: Model path or name
         model_args: Positional arguments for model loading
         base_kwargs: Base model kwargs (already filtered)
-        init_cfg: OSFT configuration
         osft_class_kwargs: OSFT class-specific parameters
+        train_dtype: Training dtype for model parameters. Falls back to base_kwargs["torch_dtype"] if not provided.
 
     Returns:
         Loaded OSFT model
@@ -952,9 +953,9 @@ def _load_model_memory_efficient(
     # Remove additional OSFT parameters before calling base model's from_pretrained
     final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
 
-    # Force CPU loading via default behavior and match the train_dtype for FSDP2
-    # Need to get train_dtype from base_kwargs or default to float32
-    load_dtype = base_kwargs.get("torch_dtype")
+    # Resolve the dtype to load the model in: prefer the explicit train_dtype,
+    # fall back to whatever torch_dtype was already set in base_kwargs.
+    load_dtype = train_dtype if train_dtype is not None else base_kwargs.get("torch_dtype")
     if load_dtype is None:
         raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
     final_base_kwargs["torch_dtype"] = load_dtype
@@ -1334,6 +1335,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     model_args,
                     base_kwargs,
                     osft_class_kwargs,
+                    train_dtype=base_kwargs.get("torch_dtype"),
                 )
             else:
                 # standard non-distributed loading
