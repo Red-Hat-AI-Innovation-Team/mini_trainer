@@ -779,6 +779,7 @@ def setup_osft_model_distributed(
     osft_target_patterns=None,
     osft_upcast_dtype=torch.float32,
     osft_output_dtype=None,
+    train_dtype: torch.dtype = torch.float32,
 ):
     """
     Initialize an OSFT model for distributed training with memory-efficient loading.
@@ -799,6 +800,7 @@ def setup_osft_model_distributed(
         osft_target_patterns: Patterns for selecting OSFT target parameters
         osft_upcast_dtype: Dtype for OSFT computations
         osft_output_dtype: Dtype for OSFT outputs
+        train_dtype: Training dtype for model parameters
 
     Returns:
         OSFT model ready for FSDP2 wrapping
@@ -821,6 +823,7 @@ def setup_osft_model_distributed(
         **base_model_args,
         "initialize_osft": True,
         "fsdp2_lazy_init": True,
+        "train_dtype": train_dtype,
         **osft_kwargs,
     }
 
@@ -1186,6 +1189,7 @@ def setup_model(
                 osft_target_patterns=osft_target_patterns,
                 osft_upcast_dtype=osft_upcast_dtype,
                 osft_output_dtype=effective_osft_output_dtype,
+                train_dtype=train_dtype,
             )
         else:
             # non-distributed path: direct OSFT model creation

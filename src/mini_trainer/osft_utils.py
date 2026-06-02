@@ -913,6 +913,7 @@ def _load_model_memory_efficient(
     model_args: tuple,
     base_kwargs: dict,
     osft_class_kwargs: dict,
+    train_dtype: torch.dtype | None = None,
 ):
     """
     Memory-efficient loading for OSFT models to avoid CUDA/CPU OOM.
@@ -927,8 +928,10 @@ def _load_model_memory_efficient(
         pretrained_model_name_or_path: Model path or name
         model_args: Positional arguments for model loading
         base_kwargs: Base model kwargs (already filtered)
-        init_cfg: OSFT configuration
         osft_class_kwargs: OSFT class-specific parameters
+        train_dtype: Training dtype for model parameters. When provided, the
+            model is loaded in this dtype instead of relying on torch_dtype
+            from base_kwargs.
 
     Returns:
         Loaded OSFT model
@@ -952,9 +955,9 @@ def _load_model_memory_efficient(
     # Remove additional OSFT parameters before calling base model's from_pretrained
     final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
 
-    # Force CPU loading via default behavior and match the train_dtype for FSDP2
-    # Need to get train_dtype from base_kwargs or default to float32
-    load_dtype = base_kwargs.get("torch_dtype")
+    # Use the explicit train_dtype when provided, otherwise fall back to
+    # torch_dtype from base_kwargs for backward compatibility.
+    load_dtype = train_dtype if train_dtype is not None else base_kwargs.get("torch_dtype")
     if load_dtype is None:
         raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
     final_base_kwargs["torch_dtype"] = load_dtype
@@ -1299,6 +1302,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             log_rank_0("\033[33m!!!! Calling from_pretrained !!!!\033[0m")
 
             initialize_osft = kwargs.pop("initialize_osft", False)
+            train_dtype = kwargs.pop("train_dtype", None)
 
             # validation
             if fsdp2_lazy_init:
@@ -1334,6 +1338,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     model_args,
                     base_kwargs,
                     osft_class_kwargs,
+                    train_dtype=train_dtype,
                 )
             else:
                 # standard non-distributed loading
