@@ -101,7 +101,7 @@ class TestMainFunctionDtypeIntegration:
                     max_tokens_per_gpu=100,
                     learning_rate=1e-5,
                     output_dir=tmpdir,
-                    # Using defaults: osft_upcast_dtype="float32", osft_output_dtype=None
+                    # Using defaults: osft_upcast_dtype="float32"
                 )
             except SystemExit:
                 pass  # typer might call sys.exit, which is fine for this test
@@ -112,7 +112,6 @@ class TestMainFunctionDtypeIntegration:
 
             # Check that the torch dtypes were passed correctly
             assert call_kwargs["osft_upcast_dtype"] == torch.float32
-            assert call_kwargs["osft_output_dtype"] is None
 
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("mini_trainer.train.get_node_rank", return_value=0)
@@ -157,7 +156,6 @@ class TestMainFunctionDtypeIntegration:
                     learning_rate=1e-5,
                     output_dir=tmpdir,
                     osft_upcast_dtype="bfloat16",
-                    osft_output_dtype="float16",
                 )
             except SystemExit:
                 pass
@@ -167,7 +165,6 @@ class TestMainFunctionDtypeIntegration:
             call_kwargs = mock_setup_model.call_args.kwargs
 
             assert call_kwargs["osft_upcast_dtype"] == torch.bfloat16
-            assert call_kwargs["osft_output_dtype"] == torch.float16
 
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("mini_trainer.train.get_node_rank", return_value=0)
@@ -212,7 +209,6 @@ class TestMainFunctionDtypeIntegration:
                     learning_rate=1e-5,
                     output_dir=tmpdir,
                     osft_upcast_dtype=None,
-                    osft_output_dtype=None,
                 )
             except SystemExit:
                 pass
@@ -222,7 +218,6 @@ class TestMainFunctionDtypeIntegration:
             call_kwargs = mock_setup_model.call_args.kwargs
 
             assert call_kwargs["osft_upcast_dtype"] is None
-            assert call_kwargs["osft_output_dtype"] is None
 
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("mini_trainer.train.get_node_rank", return_value=0)
@@ -293,7 +288,6 @@ class TestDtypeParameterLogging:
                     learning_rate=1e-5,
                     output_dir=tmpdir,
                     osft_upcast_dtype="bfloat16",
-                    osft_output_dtype="float16",
                 )
             except SystemExit:
                 pass
@@ -309,6 +303,5 @@ class TestDtypeParameterLogging:
 
             # Verify dtype parameters are in the logged parameters
             assert "osft_upcast_dtype" in logged_params
-            assert "osft_output_dtype" in logged_params
             assert logged_params["osft_upcast_dtype"] == "bfloat16"
-            assert logged_params["osft_output_dtype"] == "float16"
+            assert "osft_output_dtype" not in logged_params

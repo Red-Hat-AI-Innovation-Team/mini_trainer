@@ -120,12 +120,6 @@ class TrainingArgs:
         default="float32",
         metadata={"help": "Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."},
     )
-    osft_output_dtype: str | None = field(
-        default=None,
-        metadata={
-            "help": "Output dtype for OSFT. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc."
-        },
-    )
     # Output options
     min_samples_per_checkpoint: int | None = field(
         default=None,
