@@ -297,7 +297,7 @@ class TestSetupTrainingComponents:
         assert lr_scheduler == mock_lr_scheduler
 
         # Check FSDP2 wrapping
-        mock_wrap.assert_called_once_with(mock_model)
+        mock_wrap.assert_called_once_with(mock_model, compile_model=False)
 
         # Check optimizer creation
         mock_adamw.assert_called_once_with(

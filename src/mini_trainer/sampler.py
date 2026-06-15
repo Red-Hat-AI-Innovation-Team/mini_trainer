@@ -503,6 +503,7 @@ def padded_mb_collate_fn(minibatch: list[dict], batch_num_loss_counted_tokens: i
         }
 
     max_len = max(len(item["input_ids"]) for item in minibatch)
+    max_len = (max_len + 7) & ~7  # round up to multiple of 8 for torch.compile
 
     padded_input_ids = []
     padded_labels = []
