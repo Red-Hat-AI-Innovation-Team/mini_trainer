@@ -363,9 +363,6 @@ def compute_validation_loss(model, val_data_loader, device):
                 loss = output.loss.float().sum()
                 loss_metrics = loss.detach().item()
 
-                # Clear cache after each minibatch to prevent OOM
-                torch.cuda.empty_cache()
-
                 val_batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
                     num_total_tokens=mb["input_ids"].numel(),
@@ -943,23 +940,19 @@ def train(
 
                 # Ensure scalar loss even if model returns per-token loss
                 loss = (loss / batch_num_loss_counted_tokens) * world_size
-                loss_metrics = loss.detach().cpu().item()
+                loss_metrics = loss.detach().item()
                 loss.backward()
 
                 if callback_manager and callback_manager.has_callbacks("on_after_backward"):
                     callback_manager.context.loss = loss_metrics
                     callback_manager.fire("on_after_backward")
 
-                torch.cuda.empty_cache()
-
                 batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
                     num_total_tokens=mb["input_ids"].shape[1],
                     num_samples=mb_num_samples,
                     loss=loss_metrics,
-                    # since FSDP2 automatically averages gradients by the world-size,
-                    # each rank's gradient contributes 1/8 to the backward
-                    loss_backward=loss.detach().item() / world_size,
+                    loss_backward=loss_metrics / world_size,
                     time_per_minibatch=time.time() - mb_start_time,
                 )
 
@@ -1075,6 +1068,15 @@ def train(
                 metric_logger.log_sync(batch_metrics)
 
             dist.barrier()
+
+            if step == 1 and is_local_main_process:
+                peak_gb = batch_metrics["peak_memory_usage_GB"]
+                gpu_total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+                utilization = peak_gb / gpu_total_gb
+                log_rank_0(
+                    f"Memory after step 1: {peak_gb:.1f}GB / {gpu_total_gb:.1f}GB "
+                    f"({utilization:.0%} utilization)"
+                )
 
             # On-demand full-state checkpoint check
             if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
