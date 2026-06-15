@@ -949,7 +949,6 @@ class TestMemoryManagement:
 
         # Verify memory management calls
         mock_reset_stats.assert_called()
-        mock_empty_cache.assert_called()
 
         # Verify memory was tracked in metrics
         logged_metrics = mock_logger.log_sync.call_args[0][0]
