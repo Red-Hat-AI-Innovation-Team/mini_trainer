@@ -1069,13 +1069,12 @@ def train(
 
             dist.barrier()
 
-            if step == 1 and is_local_main_process:
+            if step == 1 and is_local_main_process and torch.cuda.is_available():
                 peak_gb = batch_metrics["peak_memory_usage_GB"]
                 gpu_total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
                 utilization = peak_gb / gpu_total_gb
                 log_rank_0(
-                    f"Memory after step 1: {peak_gb:.1f}GB / {gpu_total_gb:.1f}GB "
-                    f"({utilization:.0%} utilization)"
+                    f"Memory after step 1: {peak_gb:.1f}GB / {gpu_total_gb:.1f}GB ({utilization:.0%} utilization)"
                 )
 
             # On-demand full-state checkpoint check

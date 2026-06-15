@@ -132,10 +132,10 @@ class TestMbCollateFn:
 
         result = mb_collate_fn(minibatch, batch_num_loss_counted_tokens=4)
 
-        assert result["input_ids"].shape == (1, 5)
-        assert result["labels"].shape == (1, 5)
-        assert result["position_ids"].shape == (1, 5)
-        assert result["position_ids"].tolist() == [[0, 1, 2, 3, 4]]
+        assert result["input_ids"].shape == (1, 8)
+        assert result["labels"].shape == (1, 8)
+        assert result["position_ids"].shape == (1, 8)
+        assert result["position_ids"].tolist() == [[0, 1, 2, 3, 4, 0, 1, 2]]
         assert result["num_loss_counted_tokens"] == 4
         assert result["num_samples"] == 1
         assert result["batch_num_loss_counted_tokens"] == 4
@@ -157,13 +157,13 @@ class TestMbCollateFn:
 
         result = mb_collate_fn(minibatch, batch_num_loss_counted_tokens=6)
 
-        # Check concatenation
-        assert result["input_ids"].shape == (1, 7)
-        assert result["input_ids"].tolist() == [[1, 2, 3, 4, 5, 6, 7]]
-        assert result["labels"].tolist() == [[10, 20, 30, 40, -100, 60, 70]]
+        # Check concatenation (padded to mod-8)
+        assert result["input_ids"].shape == (1, 8)
+        assert result["input_ids"].tolist() == [[1, 2, 3, 4, 5, 6, 7, 0]]
+        assert result["labels"].tolist() == [[10, 20, 30, 40, -100, 60, 70, -100]]
 
-        # Check position_ids reset for each sequence
-        assert result["position_ids"].tolist() == [[0, 1, 2, 0, 1, 2, 3]]
+        # Check position_ids reset for each sequence (pad token starts new mini-sequence)
+        assert result["position_ids"].tolist() == [[0, 1, 2, 0, 1, 2, 3, 0]]
 
         assert result["num_loss_counted_tokens"] == 6
         assert result["num_samples"] == 2
