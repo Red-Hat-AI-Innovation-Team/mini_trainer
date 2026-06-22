@@ -846,6 +846,8 @@ def train(
         ctx.max_steps = max_steps
         ctx.max_tokens = max_tokens
         ctx.world_size = world_size
+        ctx.is_local_process_zero = is_local_main_process
+        ctx.is_world_process_zero = is_main_process
         ctx.step = step
         ctx.epoch = epoch
         ctx.total_samples = total_samples_accumulated
@@ -1618,8 +1620,7 @@ def main(
     if serialized_callbacks:
         from mini_trainer.callbacks import deserialize_callbacks_from_cli
 
-        _is_rank_0 = int(os.getenv("LOCAL_RANK", 0)) == 0
-        _callback_manager = CallbackManager(is_rank_0=_is_rank_0)
+        _callback_manager = CallbackManager()
         for _cb in deserialize_callbacks_from_cli(serialized_callbacks):
             _callback_manager.add_callback(_cb)
 

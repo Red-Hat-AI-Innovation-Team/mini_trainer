@@ -58,6 +58,8 @@ class TrainingContext:
     max_steps: int = 0
     max_tokens: int = 0
     world_size: int = 1
+    is_local_process_zero: bool = True
+    is_world_process_zero: bool = True
 
 
 class TrainerCallback:
@@ -91,16 +93,16 @@ class CallbackManager:
 
     Callbacks are dispatched asynchronously on a background event loop.
     Exceptions are caught and logged, never propagated to the training loop.
-    Callbacks only fire on rank-0 processes.
+    Callbacks fire on all ranks. Use context.is_world_process_zero or
+    context.is_local_process_zero inside your callback to gate behavior.
 
     The manager holds a shared TrainingContext that the training loop updates
     in place. On each fire(), a shallow copy is snapshotted and dispatched
     to callbacks so they see a consistent, effectively frozen view.
     """
 
-    def __init__(self, is_rank_0: bool = True):
+    def __init__(self):
         self._callbacks: list[TrainerCallback] = []
-        self._is_rank_0 = is_rank_0
         self.context = TrainingContext()
 
         self._loop = asyncio.new_event_loop()
@@ -126,8 +128,6 @@ class CallbackManager:
             self._callbacks = [cb for cb in self._callbacks if cb is not callback_or_type]
 
     def fire(self, hook_name: str, **kwargs) -> None:
-        if not self._is_rank_0:
-            return
         if not self.has_callbacks(hook_name):
             return
 

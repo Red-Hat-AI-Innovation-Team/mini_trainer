@@ -36,6 +36,8 @@ class TestTrainingContext:
         assert ctx.loss is None
         assert ctx.batch_metrics == {}
         assert ctx.world_size == 1
+        assert ctx.is_local_process_zero is True
+        assert ctx.is_world_process_zero is True
 
     def test_mutable_fields(self):
         """Test that TrainingContext fields can be updated in place."""
@@ -169,20 +171,20 @@ class TestCallbackManager:
 
     def test_add_callback(self):
         """Test adding a TrainerCallback instance."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         cb = _SignalCallback()
         mgr.add_callback(cb)
         assert mgr.has_callbacks("on_step_end")
 
     def test_add_callback_rejects_non_instance(self):
         """Test that passing a class instead of an instance raises TypeError."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         with pytest.raises(TypeError, match="Expected a TrainerCallback instance"):
             mgr.add_callback(_SignalCallback)
 
     def test_remove_callback_by_instance(self):
         """Test removing a specific callback instance."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         cb = _SignalCallback()
         mgr.add_callback(cb)
         assert mgr.has_callbacks("on_step_end")
@@ -191,7 +193,7 @@ class TestCallbackManager:
 
     def test_remove_callback_by_type(self):
         """Test removing all callbacks of a given type."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.add_callback(_SignalCallback())
         mgr.add_callback(_SignalCallback())
         assert mgr.has_callbacks("on_step_end")
@@ -201,7 +203,7 @@ class TestCallbackManager:
     def test_fire_invokes_callback(self):
         """Test that fire() dispatches the callback with correct context."""
         cb = _StepRecorderCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.context.step = 7
         mgr.add_callback(cb)
         mgr.fire("on_train_begin")
@@ -213,26 +215,37 @@ class TestCallbackManager:
         """Test that fire() invokes all registered callbacks for a hook."""
         cb1 = _SignalCallback()
         cb2 = _SignalCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.add_callback(cb1)
         mgr.add_callback(cb2)
         mgr.fire("on_step_end")
         assert cb1.event.wait(timeout=5)
         assert cb2.event.wait(timeout=5)
 
-    def test_fire_rank0_only(self):
-        """Test that callbacks are suppressed on non-rank-0 processes."""
-        cb = _SignalCallback()
-        mgr = CallbackManager(is_rank_0=False)
+    def test_fire_on_all_ranks(self):
+        """Test that callbacks fire regardless of rank; rank info is on context."""
+        cb = _StepRecorderCallback()
+        mgr = CallbackManager()
+        mgr.context.is_world_process_zero = False
+        mgr.context.is_local_process_zero = False
         mgr.add_callback(cb)
-        mgr.fire("on_step_end")
-        time.sleep(0.2)
-        assert not cb.event.is_set(), "Callback should not fire on non-rank-0"
+        mgr.fire("on_train_begin")
+        assert cb.event.wait(timeout=5), "Callback should fire on non-rank-0 processes"
+
+    def test_rank_info_on_context(self):
+        """Test that is_local_process_zero and is_world_process_zero are on context."""
+        mgr = CallbackManager()
+        assert mgr.context.is_local_process_zero is True
+        assert mgr.context.is_world_process_zero is True
+        mgr.context.is_local_process_zero = False
+        mgr.context.is_world_process_zero = False
+        assert mgr.context.is_local_process_zero is False
+        assert mgr.context.is_world_process_zero is False
 
     def test_fire_exception_swallowed(self):
         """Test that callback exceptions do not propagate to the caller."""
         cb = _ExplodingCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.add_callback(cb)
         mgr.fire("on_step_end")
         assert cb.event.wait(timeout=5), "Callback should have been invoked"
@@ -252,7 +265,7 @@ class TestCallbackManager:
         cb_logger.addHandler(handler)
         cb_logger.setLevel(logging.ERROR)
         try:
-            mgr = CallbackManager(is_rank_0=True)
+            mgr = CallbackManager()
             mgr.add_callback(cb)
             mgr.fire("on_log")
             cb.event.wait(timeout=5)
@@ -263,7 +276,7 @@ class TestCallbackManager:
 
     def test_has_callbacks_detects_overridden(self):
         """Test has_callbacks() returns True only for overridden hooks."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.add_callback(_SignalCallback())
         assert mgr.has_callbacks("on_step_end")
         assert not mgr.has_callbacks("on_train_begin")
@@ -271,18 +284,18 @@ class TestCallbackManager:
 
     def test_has_callbacks_no_callbacks(self):
         """Test has_callbacks() returns False when no callbacks registered."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         assert not mgr.has_callbacks("on_train_begin")
 
     def test_fire_no_callbacks_is_noop(self):
         """Test that fire() with no registered callbacks is a safe no-op."""
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.fire("on_train_begin")
 
     def test_async_callback_support(self):
         """Test that async (coroutine) callbacks are awaited correctly."""
         cb = _AsyncCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.context.step = 99
         mgr.add_callback(cb)
         mgr.fire("on_epoch_end")
@@ -292,7 +305,7 @@ class TestCallbackManager:
     def test_on_train_end_waits_for_completion(self):
         """Test that on_train_end blocks until callbacks finish."""
         cb = _SlowTrainEndCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.add_callback(cb)
         mgr.fire("on_train_end")
         assert cb.result.get("done"), "on_train_end should wait for callback to complete"
@@ -300,7 +313,7 @@ class TestCallbackManager:
     def test_fire_kwargs_override_context(self):
         """Test that kwargs passed to fire() override context fields in the snapshot."""
         cb = _SaveRecorderCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.context.step = 10
         mgr.context.checkpoint_path = None
         mgr.add_callback(cb)
@@ -313,7 +326,7 @@ class TestCallbackManager:
     def test_snapshot_isolation(self):
         """Test that callbacks receive a snapshot, not a reference to the shared context."""
         cb = _StepEndRecorderCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.context.step = 42
         mgr.add_callback(cb)
         mgr.fire("on_step_end")
@@ -324,7 +337,7 @@ class TestCallbackManager:
     def test_multi_hook_callback(self):
         """Test that a single callback can implement multiple hooks."""
         cb = _MultiHookCallback()
-        mgr = CallbackManager(is_rank_0=True)
+        mgr = CallbackManager()
         mgr.add_callback(cb)
         mgr.fire("on_train_begin")
         mgr.fire("on_log")
