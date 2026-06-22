@@ -17,6 +17,7 @@ from typer import Option, Typer
 from mini_trainer import mlflow_wrapper, wandb_wrapper
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer.batch_metrics import BatchMetrics
+from mini_trainer.callbacks import CallbackManager
 from mini_trainer.full_state_checkpoint import FullStateCheckpointer, find_latest_full_state_checkpoint
 from mini_trainer.sampler import get_data_loader
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
@@ -685,6 +686,7 @@ def train(
     trust_remote_code: bool = False,
     on_demand_checkpointing: bool = False,
     resume_from_full_state_checkpoint: str | None = None,
+    callback_manager: CallbackManager | None = None,
 ):
     """
     Runs the model training loop.
@@ -834,6 +836,22 @@ def train(
     # We skip by step count (not sample count) to stay consistent across ranks.
     _resume_target_step = step if resume_from_full_state_checkpoint else None
 
+    # Initialize callback context with static training parameters
+    if callback_manager:
+        ctx = callback_manager.context
+        ctx.output_dir = output_dir
+        ctx.model_name_or_path = model_name_or_path
+        ctx.training_mode = training_mode.value if isinstance(training_mode, TrainingMode) else str(training_mode)
+        ctx.max_epochs = max_epochs
+        ctx.max_steps = max_steps
+        ctx.max_tokens = max_tokens
+        ctx.world_size = world_size
+        ctx.step = step
+        ctx.epoch = epoch
+        ctx.total_samples = total_samples_accumulated
+        ctx.total_tokens = total_tokens_processed
+        callback_manager.fire("on_train_begin")
+
     # main training loop
     while not reached_stop_condition(
         training_mode=training_mode,
@@ -846,6 +864,10 @@ def train(
     ):
         # set the current epoch
         data_loader.sampler.set_epoch(epoch)
+
+        if callback_manager:
+            callback_manager.fire("on_epoch_begin")
+
         data_loader_it = iter(data_loader)
 
         _skipped_steps = 0
@@ -873,6 +895,11 @@ def train(
             batch_start_time = time.time()
             batch_totals.reset_batch()
             torch.cuda.reset_peak_memory_stats()
+
+            if callback_manager:
+                callback_manager.context.step = step
+                callback_manager.fire("on_step_begin")
+
             _interrupted = False
             for grad_accum, mb in enumerate(batch):
                 # Check for on-demand checkpoint before forward pass
@@ -896,6 +923,9 @@ def train(
                 if (attn_mask := mb.get("attention_mask")) is not None:
                     model_inputs["attention_mask"] = attn_mask.to(device)
 
+                if callback_manager and callback_manager.has_callbacks("on_before_forward"):
+                    callback_manager.fire("on_before_forward")
+
                 output = model(**model_inputs)
 
                 # GPT-OSS: add auxiliary loss if present, otherwise use standard loss
@@ -913,6 +943,11 @@ def train(
                 loss = (loss / batch_num_loss_counted_tokens) * world_size
                 loss_metrics = loss.detach().cpu().item()
                 loss.backward()
+
+                if callback_manager and callback_manager.has_callbacks("on_after_backward"):
+                    callback_manager.context.loss = loss_metrics
+                    callback_manager.fire("on_after_backward")
+
                 torch.cuda.empty_cache()
 
                 batch_totals.accumulate_minibatch_metrics(
@@ -971,9 +1006,24 @@ def train(
             total_samples_accumulated += bm["num_samples"]
             total_tokens_processed += batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
 
+            if callback_manager:
+                ctx = callback_manager.context
+                ctx.step = step
+                ctx.total_samples = total_samples_accumulated
+                ctx.total_tokens = total_tokens_processed
+
             # capture the LR that we'll use when taking a training step
             current_lr = lr_scheduler.get_last_lr()[0]
+
+            if callback_manager:
+                callback_manager.context.learning_rate = current_lr
+                callback_manager.fire("on_pre_optimizer_step")
+
             grad_norm = take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=train_dtype)
+
+            if callback_manager:
+                callback_manager.context.grad_norm = grad_norm.item()
+                callback_manager.fire("on_optimizer_step")
 
             batch_time = time.time() - batch_start_time
 
@@ -1009,6 +1059,14 @@ def train(
                     last_validation_loss = val_metrics["val_loss"]
                     print(f"Validation loss: {last_validation_loss}")
                 batch_metrics.update(val_metrics)
+
+                if callback_manager:
+                    callback_manager.fire("on_evaluate", val_metrics=val_metrics)
+
+            if callback_manager:
+                callback_manager.context.loss = logged_loss
+                callback_manager.context.batch_metrics = batch_metrics
+                callback_manager.fire("on_log")
 
             # Log metrics (progress info is printed by the logger)
             if is_local_main_process:
@@ -1058,6 +1116,10 @@ def train(
                 )
                 checkpointer.record_save("min_samples", total_samples_accumulated)
 
+                if callback_manager:
+                    _ckpt = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}")
+                    callback_manager.fire("on_save", checkpoint_path=_ckpt)
+
             # Check for best validation loss saving after validation runs
             if checkpointer.should_save_checkpoint(
                 save_type="best_val_loss",
@@ -1074,7 +1136,14 @@ def train(
                 )
                 checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
 
+                if callback_manager:
+                    _ckpt = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_best_val_loss")
+                    callback_manager.fire("on_save", checkpoint_path=_ckpt)
+
             torch.distributed.barrier()
+
+            if callback_manager:
+                callback_manager.fire("on_step_end")
 
             # Check stopping condition after each step (for STEP and TOKEN modes)
             if reached_stop_condition(
@@ -1090,6 +1159,9 @@ def train(
 
         # Increment epoch counter after completing an epoch
         epoch += 1
+
+        if callback_manager:
+            callback_manager.context.epoch = epoch
 
         # save at the current number of samples seen
         # should save at the end of each epoch
@@ -1107,6 +1179,13 @@ def train(
             )
             checkpointer.record_save("epoch", total_samples_accumulated)
 
+            if callback_manager:
+                _ckpt = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}")
+                callback_manager.fire("on_save", checkpoint_path=_ckpt)
+
+        if callback_manager:
+            callback_manager.fire("on_epoch_end")
+
     torch.distributed.barrier()
     # save one last time if we haven't yet
     if checkpointer.should_save_checkpoint(
@@ -1122,6 +1201,13 @@ def train(
             trust_remote_code=trust_remote_code,
         )
         checkpointer.record_save("final", total_samples_accumulated)
+
+        if callback_manager:
+            _ckpt = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}")
+            callback_manager.fire("on_save", checkpoint_path=_ckpt)
+
+    if callback_manager:
+        callback_manager.fire("on_train_end")
 
 
 def calculate_num_training_steps(
@@ -1295,6 +1381,11 @@ def main(
     mlflow_tracking_uri: Annotated[str | None, Option(help="MLflow tracking server URI")] = None,
     mlflow_experiment_name: Annotated[str | None, Option(help="MLflow experiment name")] = None,
     mlflow_run_name: Annotated[str | None, Option(help="MLflow run name")] = None,
+    # Callback support (internal: populated by api_train.py)
+    serialized_callbacks: Annotated[
+        str | None,
+        Option(help="Base64-encoded serialized callbacks (internal use by api_train)"),
+    ] = None,
 ):
     # Reproducibility: align with HF Trainer seeding behavior
     set_seed(seed)
@@ -1522,6 +1613,16 @@ def main(
         resume_from_checkpoint=resume_from_full_state_checkpoint,
     )
 
+    # Reconstruct callbacks from serialized CLI arg
+    _callback_manager = None
+    if serialized_callbacks:
+        from mini_trainer.callbacks import deserialize_callbacks_from_cli
+
+        _is_rank_0 = int(os.getenv("LOCAL_RANK", 0)) == 0
+        _callback_manager = CallbackManager(is_rank_0=_is_rank_0)
+        for _cb in deserialize_callbacks_from_cli(serialized_callbacks):
+            _callback_manager.add_callback(_cb)
+
     train(
         model=model,
         optimizer=optimizer,
@@ -1546,6 +1647,7 @@ def main(
         trust_remote_code=trust_remote_code,
         on_demand_checkpointing=on_demand_checkpointing,
         resume_from_full_state_checkpoint=resume_from_full_state_checkpoint,
+        callback_manager=_callback_manager,
     )
 
     # once done, tear down distributed environment

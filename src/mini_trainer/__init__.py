@@ -16,6 +16,7 @@ from . import (
     api_train,
     batch_metrics,
     batch_packer,
+    callbacks,
     none_reduction_losses,
     osft_utils,
     sampler,
@@ -26,12 +27,14 @@ from . import (
 
 # Export main API functions for convenience
 from .api_train import run_training
+from .callbacks import CallbackManager, TrainerCallback, TrainingContext
 from .training_types import PretrainingConfig, TorchrunArgs, TrainingArgs, TrainingMode
 
 __all__ = [
     "api_train",
     "batch_metrics",
     "batch_packer",
+    "callbacks",
     "none_reduction_losses",
     "sampler",
     "setup_model_for_training",
@@ -44,4 +47,7 @@ __all__ = [
     "TrainingArgs",
     "TrainingMode",
     "PretrainingConfig",
+    "CallbackManager",
+    "TrainerCallback",
+    "TrainingContext",
 ]

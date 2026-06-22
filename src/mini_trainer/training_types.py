@@ -234,3 +234,13 @@ class TrainingArgs:
             "The checkpoint must have been saved by the on-demand checkpointing system."
         },
     )
+
+    # Callbacks (async, fire-and-forget)
+    callbacks: list | None = field(
+        default=None,
+        metadata={
+            "help": "List of TrainerCallback instances. Subclass TrainerCallback and "
+            "override the hooks you need. Callbacks must be self-contained (all imports "
+            "inside method bodies) to work across the torchrun subprocess boundary."
+        },
+    )

@@ -197,6 +197,11 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if train_args.resume_from_full_state_checkpoint:
         command.append(f"--resume-from-full-state-checkpoint={train_args.resume_from_full_state_checkpoint}")
 
+    if train_args.callbacks:
+        from mini_trainer.callbacks import serialize_callbacks_for_cli
+
+        command.append(f"--serialized-callbacks={serialize_callbacks_for_cli(train_args.callbacks)}")
+
     logger.info("Running training command as subprocess: %s", " ".join(command))
 
     # Install parent-side signal handler for on-demand checkpointing.
