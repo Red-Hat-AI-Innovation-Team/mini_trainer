@@ -1024,7 +1024,7 @@ def train(
             grad_norm = take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=train_dtype)
 
             if callback_manager:
-                callback_manager.context.grad_norm = grad_norm.item()
+                callback_manager.context.grad_norm = grad_norm.item() if grad_norm is not None else None
                 callback_manager.fire("on_optimizer_step")
 
             batch_time = time.time() - batch_start_time
@@ -1067,7 +1067,7 @@ def train(
 
             if callback_manager:
                 callback_manager.context.loss = logged_loss
-                callback_manager.context.batch_metrics = batch_metrics
+                callback_manager.context.batch_metrics = dict(batch_metrics)
                 callback_manager.fire("on_log")
 
             # Log metrics (progress info is printed by the logger)

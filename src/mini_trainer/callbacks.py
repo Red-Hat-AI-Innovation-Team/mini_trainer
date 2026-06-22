@@ -118,6 +118,11 @@ class CallbackManager:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    def close(self):
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+        self._loop.close()
+
     def add_callback(self, callback: TrainerCallback) -> None:
         if not isinstance(callback, TrainerCallback):
             raise TypeError(
@@ -140,7 +145,10 @@ class CallbackManager:
         snapshot.hook_name = hook_name
         snapshot.batch_metrics = dict(snapshot.batch_metrics)
         snapshot.val_metrics = dict(snapshot.val_metrics)
+        _valid_fields = {f.name for f in snapshot.__dataclass_fields__.values()}
         for key, value in kwargs.items():
+            if key not in _valid_fields:
+                raise ValueError(f"Unknown TrainingContext field: '{key}'. Valid fields: {sorted(_valid_fields)}")
             setattr(snapshot, key, value)
 
         for callback in self._callbacks:
@@ -151,6 +159,12 @@ class CallbackManager:
             if hook_name == "on_train_end":
                 try:
                     future.result(timeout=10)
+                except TimeoutError:
+                    logger.warning(
+                        "Callback %s.%s timed out during on_train_end (10s limit).",
+                        type(callback).__name__,
+                        hook_name,
+                    )
                 except Exception:
                     pass
 
