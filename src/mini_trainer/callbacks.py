@@ -67,6 +67,11 @@ class TrainerCallback:
 
     All methods are no-ops by default. Callbacks receive a TrainingContext
     snapshot and are purely observational (they cannot affect training flow).
+    Callbacks fire on all ranks; use context.is_world_process_zero or
+    context.is_local_process_zero to gate rank-specific behavior.
+
+    Note: on_before_forward and on_after_backward fire once per microbatch
+    inside the gradient accumulation loop, not once per training step.
 
     Callbacks must be self-contained for serialization across the torchrun
     subprocess boundary: all imports must be inside method bodies, and
@@ -133,6 +138,8 @@ class CallbackManager:
 
         snapshot = copy.copy(self.context)
         snapshot.hook_name = hook_name
+        snapshot.batch_metrics = dict(snapshot.batch_metrics)
+        snapshot.val_metrics = dict(snapshot.val_metrics)
         for key, value in kwargs.items():
             setattr(snapshot, key, value)
 

@@ -1,9 +1,9 @@
 """
 Test suite for the callback system.
 
-Tests async fire-and-forget dispatch, rank-0 gating, mutable context with
-snapshot isolation, class-based interface, and serialization for crossing
-the torchrun subprocess boundary.
+Tests async fire-and-forget dispatch, per-rank context exposure, mutable
+context with snapshot isolation, class-based interface, and serialization
+for crossing the torchrun subprocess boundary.
 """
 
 import asyncio
@@ -14,7 +14,6 @@ import time
 import pytest
 
 from mini_trainer.callbacks import (
-    HOOK_NAMES,
     CallbackManager,
     TrainerCallback,
     TrainingContext,
