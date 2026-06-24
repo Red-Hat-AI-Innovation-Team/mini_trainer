@@ -1799,6 +1799,33 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             for key in self.logical_osft_keys:
                 self._prepare_osft_param(key)
 
+        @torch.no_grad()
+        def _restore_dense_linears(self):
+            """Replace OSFTLinear modules with standard nn.Linear so that
+            the original parameter FQNs (e.g. ``q_proj.weight``) are restored.
+
+            Must be called before ``_reset_osft_metadata`` clears the registry.
+            """
+            for orig_key, spec in self.osft_paramspec_registry.items():
+                mod_path = orig_key.rsplit(".", 1)[0]
+                parent, child_name = self._get_module_by_name(mod_path)
+                osft_mod = getattr(parent, child_name, None)
+                if not isinstance(osft_mod, OSFTLinear):
+                    continue
+                svd_dict = self.get_svd_dict_for_module(osft_mod)
+                W = reconstruct_weight_matrix(
+                    svd_dict,
+                    upcast_dtype=self.upcast_dtype,
+                    output_dtype=self.output_dtype,
+                )
+                out_features, in_features = W.shape
+                has_bias = osft_mod.bias is not None
+                linear = nn.Linear(in_features, out_features, bias=has_bias, device=W.device, dtype=W.dtype)
+                linear.weight = nn.Parameter(W, requires_grad=True)
+                if has_bias:
+                    linear.bias = nn.Parameter(osft_mod.bias.data, requires_grad=osft_mod.bias.requires_grad)
+                setattr(parent, child_name, linear)
+
         def reinitialize_osft(self, decompose_existing_weights: bool, assigned_params=None):
             """
             Reinitializes the OSFT decomposition (e.g., when learning a new task in continual learning).
@@ -1813,6 +1840,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             log_rank_0("🔄 [reinitialize_osft] Starting OSFT reinitialization")
             log_rank_0(f"   • decompose_existing_weights: {decompose_existing_weights}")
             log_rank_0(f"   • assigned_params: {len(assigned_params) if assigned_params else 'None (all params)'}")
+
+            if self.osft_paramspec_registry:
+                self._restore_dense_linears()
 
             self._reset_osft_metadata()
 
