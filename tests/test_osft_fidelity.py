@@ -372,7 +372,7 @@ class TestSVDNumericalStability:
 
 
 class TestFactorizedLinearAccuracy:
-    """Test that _factorized_linear produces the same results as standard linear operations."""
+    """Test that OSFTLinear forward produces the same results as standard linear operations."""
 
     @pytest.fixture
     def simple_model_with_osft(self):

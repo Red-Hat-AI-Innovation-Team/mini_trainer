@@ -210,7 +210,7 @@ class OSFTModelProtocol(Protocol):
 
     osft_config: dict[str, int]
     name_mapping: dict[str, str]
-    osft_params: nn.ModuleDict
+    osft_paramspec_registry: dict
     upcast_dtype: torch.dtype
     output_dtype: torch.dtype
 
@@ -1820,7 +1820,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 )
                 out_features, in_features = W.shape
                 has_bias = osft_mod.bias is not None
-                linear = nn.Linear(in_features, out_features, bias=has_bias, device=W.device, dtype=W.dtype)
+                linear = nn.Linear(in_features, out_features, bias=has_bias, device="meta", dtype=W.dtype)
                 linear.weight = nn.Parameter(W, requires_grad=True)
                 if has_bias:
                     linear.bias = nn.Parameter(osft_mod.bias.data, requires_grad=osft_mod.bias.requires_grad)
