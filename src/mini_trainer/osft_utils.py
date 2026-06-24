@@ -5,7 +5,6 @@ import types
 import typing as t
 from dataclasses import dataclass
 from typing import Protocol
-from weakref import ref as weakref
 
 import numpy as np
 import torch
@@ -132,6 +131,73 @@ class SVDDictBase(t.TypedDict):
 
 class SVDDecompositionDict(SVDDictBase, total=False):
     rank_high: int
+
+
+class OSFTLinear(nn.Module):
+    """Factorized linear using SVD components: W = U_high @ diag(S_high) @ V_high + U_low @ diag(S_low) @ V_low.
+
+    Replaces closure-based forward overrides with a proper nn.Module whose
+    forward is pure tensor math — no weakrefs, dict construction, getattr,
+    or runtime .to() calls — so torch.compile can trace it without graph breaks.
+
+    Attribute names (osft_U_high, osft_S_high, osft_V_high, osft_params.U_low,
+    osft_params.S_low, osft_params.V_low) match the existing convention so that
+    project_gradients, project_parameters, get_svd_dict_for_module, and
+    prepare_state_dict_for_save continue to work unchanged.
+    """
+
+    def __init__(self, U_high, S_high, V_high, U_low, S_low, V_low, bias=None, rank_high=None):
+        super().__init__()
+        self.osft_U_high = nn.Parameter(U_high, requires_grad=False)
+        self.osft_S_high = nn.Parameter(S_high, requires_grad=False)
+        self.osft_V_high = nn.Parameter(V_high, requires_grad=False)
+        osft_params = nn.Module()
+        osft_params.U_low = U_low
+        osft_params.S_low = S_low
+        osft_params.V_low = V_low
+        self.osft_params = osft_params
+        # rank_high: full (unsharded) k_high dimension, needed by V all-gather
+        # in project_gradients. Stored as a persistent int buffer so it survives
+        # FSDP2 sharding (S_high.shape[0] becomes the local shard size, not full).
+        if rank_high is not None:
+            # Infer device from an existing parameter so the buffer lives on the
+            # same device (meta during lazy init, CPU/CUDA during standard init).
+            buf_device = U_high.device
+            self.register_buffer(
+                "_rank_high_buf",
+                torch.tensor(rank_high, dtype=torch.long, device=buf_device),
+                persistent=True,
+            )
+            self._rank_high_cached: int | None = rank_high
+        else:
+            self._rank_high_buf = None
+            self._rank_high_cached = None
+        if bias is not None:
+            self.bias = nn.Parameter(bias.data, requires_grad=bias.requires_grad)
+        else:
+            self.bias = None
+
+    @property
+    def rank_high(self) -> int:
+        if self._rank_high_cached is not None:
+            return self._rank_high_cached
+        # Lazy extract after set_model_state_dict materializes the buffer.
+        # Single .item() call, then cached for all subsequent accesses.
+        buf = self._rank_high_buf
+        if buf is not None and buf.device.type != "meta":
+            self._rank_high_cached = buf.item()
+            return self._rank_high_cached
+        return self.osft_S_high.shape[0]
+
+    def forward(self, x):
+        x_V_high = x @ self.osft_V_high.transpose(0, 1)
+        result_high = (x_V_high * self.osft_S_high) @ self.osft_U_high.transpose(0, 1)
+        x_V_low = x @ self.osft_params.V_low.transpose(0, 1)
+        result_low = (x_V_low * self.osft_params.S_low) @ self.osft_params.U_low.transpose(0, 1)
+        result = result_high + result_low
+        if self.bias is not None:
+            result = result + self.bias
+        return result
 
 
 class OSFTModelProtocol(Protocol):
@@ -1166,7 +1232,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # create a set of logical keys
             self.lazy_init_param_keys = lazy_init_param_keys if lazy_init_param_keys else []
             self.lazy_init_buffer_dict = lazy_init_buffer_dict if lazy_init_buffer_dict else {}
-            self._osft_handles: dict[str, tuple[weakref[nn.Module], str]] = {}
             self.logical_osft_keys = []
             self.orig_param_registry: dict[str, ParamSpec] = {}  # stores all of the original params
             self.osft_paramspec_registry: dict[str, OSFTFactorSpec] = {}
@@ -1196,8 +1261,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             self.logical_osft_keys = []
             self.orig_param_registry = {}
             self.osft_paramspec_registry = {}
-            self._osft_handles = {}
-            self.osft_params = {}
             # Clear any cached all-gathered V_high — V_high changes on reinit.
             for module in self.modules():
                 if hasattr(module, "_osft_v_high_full"):
@@ -1589,7 +1652,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                             osft_spec.U_high: ensure_dtype(svd_dict["U_high"], expected_dtype),
                             osft_spec.S_high: ensure_dtype(svd_dict["S_high"], expected_dtype),
                             osft_spec.V_high: ensure_dtype(svd_dict["V_high"], expected_dtype),
-                            osft_spec.rank_high: svd_dict["rank_high"],
+                            osft_spec.rank_high: torch.tensor(svd_dict["rank_high"], dtype=torch.long),
                         }
                     )
 
@@ -1733,12 +1796,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 if is_osft_param:
                     self.logical_osft_keys.append(pk)
 
-            # next, we actually register these keys
-            # and replace them with the OSFT equivalents
             for key in self.logical_osft_keys:
-                # here we build the association to the original key
-                mod, attr = self._get_module_by_name(key)
-                self._register_osft_target(key, mod, attr)
                 self._prepare_osft_param(key)
 
         def reinitialize_osft(self, decompose_existing_weights: bool, assigned_params=None):
@@ -1795,23 +1853,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             self._lazy_init_pending = False
             set_fsdp2_lazy_init_mode(self, None)
 
-        def _get_module_by_logical_key(self, logical_key: str):
-            """Return (module, attr) using the stable handle; independent of FQNs/wrappers."""
-            try:
-                wr, attr = self._osft_handles[logical_key]
-            except KeyError:
-                return None, None
-            mod = wr()
-            return (mod, attr) if mod is not None else (None, None)
-
-        # call this BEFORE activation checkpointing / fully_shard
-        def _register_osft_target(self, logical_key: str, module: nn.Module, attr: str):
-            """Record a stable handle to the parent module + attribute name for a target param."""
-            # Optional: tag the Parameter for debugging/validation
-            p = getattr(module, attr)
-            p._osft_key = logical_key
-            self._osft_handles[logical_key] = (weakref(module), attr)
-
         def _record_osft_factor_spec(self, logical_key: str, attr: str) -> OSFTFactorSpec:
             """Create and store the factor spec describing where OSFT tensors live."""
             parent_logical_key = logical_key.rsplit(".", 1)[0] if "." in logical_key else ""
@@ -1827,7 +1868,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 U_low=_compose(parent_logical_key, "osft_params.U_low"),
                 S_low=_compose(parent_logical_key, "osft_params.S_low"),
                 V_low=_compose(parent_logical_key, "osft_params.V_low"),
-                rank_high=_compose(parent_logical_key, "osft_params.rank_high"),
+                rank_high=_compose(parent_logical_key, "_rank_high_buf"),
             )
             self.osft_paramspec_registry[logical_key] = spec
             return spec
@@ -1846,15 +1887,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
         def _prepare_osft_param(self, logical_key: str):
             """
-            Prepares an OSFT parameter by initializing an OSFT module at the given
-            key and removes the actual weight.
+            Prepares an OSFT parameter by replacing the Linear module with an
+            OSFTLinear at the same position in the module tree.
             """
-            mod_ref, attr = self._osft_handles[logical_key]
-            mod = mod_ref()
+            mod, attr = self._get_module_by_name(logical_key)
             if mod is None:
-                raise ValueError(f"requested module {logical_key} but ref is None")
+                raise ValueError(f"requested module {logical_key} but could not be found")
 
-            # next we register the parameter and remove the attribute
             meta_weight = getattr(mod, attr)
             top_K = self.osft_config[logical_key]
             svd_dict = create_svd_dict(
@@ -1866,51 +1905,26 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 output_dtype=meta_weight.dtype,
             )
 
-            # next, we create a new module and register the parameters
-            # TODO: move these no-grad params onto the SVD module
-            mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
-            mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
-            mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+            bias = getattr(mod, "bias", None)
+            osft_linear = OSFTLinear(
+                U_high=svd_dict["U_high"],
+                S_high=svd_dict["S_high"],
+                V_high=svd_dict["V_high"],
+                U_low=svd_dict["U_low"],
+                S_low=svd_dict["S_low"],
+                V_low=svd_dict["V_low"],
+                bias=bias,
+                rank_high=svd_dict["rank_high"],
+            )
 
-            # Trainable low-rank components
-            module_svd = nn.Module()
-            module_svd.U_low = svd_dict["U_low"]
-            module_svd.S_low = svd_dict["S_low"]
-            module_svd.V_low = svd_dict["V_low"]
-            module_svd.rank_high = svd_dict["rank_high"]
+            safe_name = logical_key.replace(".", "_")
+            self.name_mapping[logical_key] = safe_name
+            osft_linear.osft_params.safe_name = safe_name
 
-            # this we want to improve
-            mod.add_module("osft_params", module_svd)
-
-            # Override linear projection to use module-local OSFT params
-            # Note: we use the logical key to look up the module dynamically via the handle registry
-            # to ensure the reference survives FSDP2 wrapping and activation checkpointing
-            def make_forward(lkey):
-                def forward(x):
-                    owner_mod, _ = self._get_module_by_logical_key(lkey)
-                    if owner_mod is None:
-                        raise RuntimeError(f"Module for logical key '{lkey}' not found in handle registry")
-                    svd_dict = {
-                        "U_high": owner_mod.osft_U_high,
-                        "S_high": owner_mod.osft_S_high,
-                        "V_high": owner_mod.osft_V_high,
-                        "U_low": owner_mod.osft_params.U_low,
-                        "S_low": owner_mod.osft_params.S_low,
-                        "V_low": owner_mod.osft_params.V_low,
-                        "rank_high": owner_mod.osft_params.rank_high,
-                    }
-                    # retrieve bias dynamically to avoid meta tensor issues
-                    bias = getattr(owner_mod, "bias", None)
-                    return self._factorized_linear(x, svd_dict, bias)
-
-                return forward
-
-            # update the forward
-            mod.forward = make_forward(logical_key)
-            meta_weight.requires_grad = False
+            mod_path = logical_key.rsplit(".", 1)[0]
+            parent, child_name = self._get_module_by_name(mod_path)
+            setattr(parent, child_name, osft_linear)
             self._record_osft_factor_spec(logical_key, attr)
-
-            mod._parameters.pop(attr)
 
         @torch.no_grad()
         def process_param_into_svd_dict(self, param: torch.Tensor, name: str) -> SVDDecompositionDict:
@@ -2029,10 +2043,17 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         output_dtype=self.output_dtype,
                     )
 
-                    # Move SVD components to target device and clear GPU cache
+                    # Move SVD results back to the original parameter's device.
+                    # SVD runs on GPU for speed, but the module should live where
+                    # its predecessor lived.  FSDP2 handles final placement.
+                    # Tensor.to() across devices strips nn.Parameter, so re-wrap.
+                    orig_device = param.device
                     for key in svd_dict:
                         if isinstance(svd_dict[key], torch.Tensor):
-                            svd_dict[key] = svd_dict[key].to(target_device)
+                            moved = svd_dict[key].to(orig_device)
+                            if isinstance(svd_dict[key], nn.Parameter) and not isinstance(moved, nn.Parameter):
+                                moved = nn.Parameter(moved, requires_grad=svd_dict[key].requires_grad)
+                            svd_dict[key] = moved
 
                     # Clear the temporary GPU + CPU tensor
                     del param_gpu
@@ -2047,63 +2068,25 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     safe_name = name.replace(".", "_")
                     self.name_mapping[name] = safe_name
 
-                    # Attach OSFT components to the owning module so only block-local params materialize
                     mod, attr = self._get_module_by_name(name)
-
-                    # Register this target in the handle registry for stable lookups
-                    self._register_osft_target(name, mod, attr)
-
-                    # High-rank frozen components
-                    mod.register_parameter(
-                        "osft_U_high",
-                        nn.Parameter(svd_dict["U_high"], requires_grad=False),
+                    bias = getattr(mod, "bias", None)
+                    osft_linear = OSFTLinear(
+                        U_high=svd_dict["U_high"],
+                        S_high=svd_dict["S_high"],
+                        V_high=svd_dict["V_high"],
+                        U_low=svd_dict["U_low"],
+                        S_low=svd_dict["S_low"],
+                        V_low=svd_dict["V_low"],
+                        bias=bias,
+                        rank_high=svd_dict["rank_high"],
                     )
-                    mod.register_parameter(
-                        "osft_S_high",
-                        nn.Parameter(svd_dict["S_high"], requires_grad=False),
-                    )
-                    mod.register_parameter(
-                        "osft_V_high",
-                        nn.Parameter(svd_dict["V_high"], requires_grad=False),
-                    )
-                    # Trainable low-rank components
-                    module_svd = nn.Module()
-                    module_svd.U_low = svd_dict["U_low"]
-                    module_svd.S_low = svd_dict["S_low"]
-                    module_svd.V_low = svd_dict["V_low"]
-                    module_svd.rank_high = svd_dict["rank_high"]
-                    module_svd.safe_name = safe_name
-                    mod.add_module("osft_params", module_svd)
+                    osft_linear.osft_params.safe_name = safe_name
 
-                    # Override linear projection to use module-local OSFT params
-                    # Note: we use the logical key to look up the module dynamically via the handle registry
-                    # to ensure the reference survives FSDP2 wrapping and activation checkpointing
-                    def make_forward(lkey):
-                        def forward(x):
-                            owner_mod, _ = self._get_module_by_logical_key(lkey)
-                            if owner_mod is None:
-                                raise RuntimeError(f"Module for logical key '{lkey}' not found in handle registry")
-                            svd_dict = {
-                                "U_high": owner_mod.osft_U_high,
-                                "S_high": owner_mod.osft_S_high,
-                                "V_high": owner_mod.osft_V_high,
-                                "U_low": owner_mod.osft_params.U_low,
-                                "S_low": owner_mod.osft_params.S_low,
-                                "V_low": owner_mod.osft_params.V_low,
-                                "rank_high": owner_mod.osft_params.rank_high,
-                            }
-                            # retrieve bias dynamically to avoid meta tensor issues
-                            bias = getattr(owner_mod, "bias", None)
-                            return self._factorized_linear(x, svd_dict, bias)
-
-                        return forward
-
-                    mod.forward = make_forward(name)
-                    param.requires_grad = False
-                    # Remove original parameter so it doesn't get updated
-                    mod._parameters.pop(attr, None)
+                    # Replace Linear with OSFTLinear in the parent module
+                    mod_path = name.rsplit(".", 1)[0]
+                    parent, child_name = self._get_module_by_name(mod_path)
+                    setattr(parent, child_name, osft_linear)
                     self._record_osft_factor_spec(name, attr)
-                    torch.cuda.empty_cache()
 
                     osft_params_processed += 1
 
@@ -2147,49 +2130,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             svd_dict = self.get_svd_dict_for_module(mod)
             return reconstruct_weight_matrix(svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype)
 
-        def _factorized_linear(self, x, svd_dict, bias=None):
-            """
-            Efficient factorized linear operation using SVD components.
-
-            Computes: x @ (U_high @ S_high @ V_high + U_low @ S_low @ V_low).T + bias
-            As: (x @ V_high.T) @ (S_high * U_high).T + (x @ V_low.T) @ (S_low * U_low).T
-            """
-            # Extract components
-            U_high = svd_dict["U_high"]
-            S_high = svd_dict["S_high"]
-            V_high = svd_dict["V_high"]
-            U_low = svd_dict["U_low"]
-            S_low = svd_dict["S_low"]
-            V_low = svd_dict["V_low"]
-
-            device = x.device
-            dtype = x.dtype
-
-            # Move to correct device (keep native dtype)
-            U_high = U_high.to(device=device)
-            S_high = S_high.to(device=device)
-            V_high = V_high.to(device=device)
-            U_low = U_low.to(device=device)
-            S_low = S_low.to(device=device)
-            V_low = V_low.to(device=device)
-
-            # High-rank path (frozen): x @ V_high.T -> (batch, seq, rank_high)
-            x_V_high = x @ V_high.transpose(0, 1)
-            result_high = (x_V_high * S_high) @ U_high.transpose(0, 1)
-
-            # Low-rank path (trainable): x @ V_low.T -> (batch, seq, rank_low)
-            x_V_low = x @ V_low.transpose(0, 1)
-            result_low = (x_V_low * S_low) @ U_low.transpose(0, 1)
-
-            # Combine both paths
-            result = result_high + result_low
-
-            # Add bias if present
-            if bias is not None:
-                result = result + bias.to(device=device, dtype=dtype)
-
-            return result
-
         def get_svd_dict_for_module(self, module) -> SVDDecompositionDict:
             if not hasattr(module, "osft_params"):
                 raise ValueError("Module does not have OSFT parameters attached")
@@ -2199,16 +2139,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             ):
                 raise ValueError("Module is missing OSFT high-rank tensors (U/S/V_high)")
             module_svd = module.osft_params
-            S_high = module.osft_S_high
-            rank_high = S_high.shape[0]
             svd_dict: SVDDecompositionDict = {
                 "U_high": module.osft_U_high,
-                "S_high": S_high,
+                "S_high": module.osft_S_high,
                 "V_high": module.osft_V_high,
                 "U_low": module_svd.U_low,
                 "S_low": module_svd.S_low,
                 "V_low": module_svd.V_low,
-                "rank_high": rank_high,
+                "rank_high": module.rank_high,
             }
             return svd_dict
 
@@ -2451,6 +2389,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 U_low = state_dict.pop(osft_factors.U_low)
                 S_low = state_dict.pop(osft_factors.S_low)
                 V_low = state_dict.pop(osft_factors.V_low)
+                state_dict.pop(osft_factors.rank_high, None)
                 W = reconstruct_weight_matrix(
                     {
                         "U_high": U_high,

@@ -752,8 +752,6 @@ class TestOSFTModelCreation:
         model = OSFTModelClass(config, osft_config={}, initialize_osft=False)
 
         assert model.osft_config == {}
-        assert hasattr(model, "osft_params")
-        assert len(model.osft_params) == 0
 
 
 class TestSetupModelIntegration:
@@ -2290,10 +2288,10 @@ class TestPostStepParameterProjection:
                 # Add a component in the frozen subspace direction
                 with torch.no_grad():
                     module.osft_params.U_low.data += U_high @ torch.randn(
-                        U_high.shape[1], module.osft_params.U_low.shape[1]
+                        U_high.shape[1], module.osft_params.U_low.shape[1], device=U_high.device
                     )
                     module.osft_params.V_low.data += (
-                        torch.randn(module.osft_params.V_low.shape[0], V_high.shape[0]) @ V_high
+                        torch.randn(module.osft_params.V_low.shape[0], V_high.shape[0], device=V_high.device) @ V_high
                     )
 
         # Now project parameters
@@ -2471,7 +2469,7 @@ class TestPostStepParameterProjection:
             if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
                 with torch.no_grad():
                     module.osft_params.U_low.data += module.osft_U_high @ torch.randn(
-                        module.osft_U_high.shape[1], module.osft_params.U_low.shape[1]
+                        module.osft_U_high.shape[1], module.osft_params.U_low.shape[1], device=module.osft_U_high.device
                     )
 
         # First projection

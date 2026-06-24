@@ -30,12 +30,13 @@ def create_tiny_llama_model():
     return LlamaForCausalLM(config), config
 
 
-def _run_steps(model_path, compile_model, input_ids, labels, num_steps=3):
+def _run_steps(model_path, compile_model, input_ids, labels, num_steps=3, osft=False, osft_rank_ratio=0.25):
     """Load model, wrap with FSDP2 (± compile), run steps, return losses."""
     model = setup_model(
         model_name_or_path=str(model_path),
         use_liger_kernels=False,
-        osft=False,
+        osft=osft,
+        osft_rank_ratio=osft_rank_ratio if osft else None,
         local_rank=0,
     )
     model, optimizer, lr_scheduler = setup_training_components(
@@ -277,3 +278,150 @@ class TestCompile:
         loss = output.loss.float().sum()
         loss.backward()
         optimizer.step()
+
+
+@pytest.mark.gpu
+class TestOSFTCompile:
+    @pytest.fixture(autouse=True, scope="class")
+    def dist_env(self):
+        os.environ["RANK"] = "0"
+        os.environ["WORLD_SIZE"] = "1"
+        os.environ["LOCAL_RANK"] = "0"
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12357"
+        dist.init_process_group(backend="nccl", rank=0, world_size=1)
+
+        from mini_trainer.none_reduction_losses import (
+            hf_fixed_cross_entropy_none_reduction,
+        )
+
+        patch_target_module(
+            "transformers.loss.loss_utils.fixed_cross_entropy",
+            hf_fixed_cross_entropy_none_reduction,
+        )
+
+        yield
+
+        dist.destroy_process_group()
+
+    @pytest.fixture(autouse=True)
+    def reset_dynamo(self):
+        torch._dynamo.reset()
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = False
+        yield
+        torch._dynamo.reset()
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = False
+
+    @pytest.fixture
+    def saved_model(self, tmp_path):
+        torch.manual_seed(42)
+        model, config = create_tiny_llama_model()
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token
+        model_path = tmp_path / "tiny_llama"
+        model.save_pretrained(model_path)
+        tokenizer.save_pretrained(model_path)
+        return model_path, config
+
+    def test_osft_compiled_matches_eager(self, saved_model, single_gpu_device):
+        """Compiled and eager OSFT produce approximately equal losses."""
+        model_path, config = saved_model
+
+        torch.manual_seed(99)
+        input_ids = torch.randint(0, config.vocab_size, (2, 32), device=single_gpu_device)
+        labels = input_ids.clone()
+
+        torch.manual_seed(7)
+        torch.cuda.manual_seed(7)
+        eager_losses, eager_model = _run_steps(
+            model_path, compile_model=False, input_ids=input_ids, labels=labels, osft=True,
+        )
+
+        del eager_model
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch._dynamo.reset()
+
+        torch.manual_seed(7)
+        torch.cuda.manual_seed(7)
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+        compiled_losses, _ = _run_steps(
+            model_path, compile_model=True, input_ids=input_ids, labels=labels, osft=True,
+        )
+
+        for step, (e, c) in enumerate(zip(eager_losses, compiled_losses)):
+            assert abs(e - c) < 0.1, (
+                f"Step {step}: eager loss {e:.6f} vs compiled loss {c:.6f}, diff {abs(e - c):.2e} exceeds tolerance 0.1"
+            )
+
+    def test_osft_no_graph_breaks(self, saved_model, single_gpu_device):
+        """OSFT forward/backward completes under fullgraph=True with varied seq_len."""
+        model_path, config = saved_model
+
+        torch._dynamo.utils.counters.clear()
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+
+        model = setup_model(
+            model_name_or_path=str(model_path),
+            use_liger_kernels=False,
+            osft=True,
+            osft_rank_ratio=0.25,
+            local_rank=0,
+        )
+        model, optimizer, lr_scheduler = setup_training_components(
+            model,
+            learning_rate=1e-3,
+            num_warmup_steps=0,
+            lr_scheduler="constant",
+            compile_model=True,
+        )
+
+        input_ids_1 = torch.randint(0, config.vocab_size, (2, 32), device=single_gpu_device)
+        optimizer.zero_grad()
+        loss = model(input_ids=input_ids_1, labels=input_ids_1.clone()).loss.float().sum()
+        loss.backward()
+        optimizer.step()
+
+        compilations_after_first = torch._dynamo.utils.counters["stats"]["ok"]
+
+        input_ids_2 = torch.randint(0, config.vocab_size, (2, 48), device=single_gpu_device)
+        optimizer.zero_grad()
+        loss = model(input_ids=input_ids_2, labels=input_ids_2.clone()).loss.float().sum()
+        loss.backward()
+        optimizer.step()
+
+        compilations_after_second = torch._dynamo.utils.counters["stats"]["ok"]
+
+        graph_breaks = dict(torch._dynamo.utils.counters["graph_break"])
+        assert len(graph_breaks) == 0, f"Graph breaks detected: {graph_breaks}"
+
+        assert compilations_after_second == compilations_after_first, (
+            f"dynamic=True should prevent recompilation on shape change, "
+            f"but compilations went from {compilations_after_first} to {compilations_after_second}"
+        )
+
+    def test_osft_optimized_module_wrappers(self, saved_model, single_gpu_device):
+        """Compiled OSFT blocks are OptimizedModule."""
+        model_path, _ = saved_model
+
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+        model = setup_model(
+            model_name_or_path=str(model_path),
+            use_liger_kernels=False,
+            osft=True,
+            osft_rank_ratio=0.25,
+            local_rank=0,
+        )
+        model, _, _ = setup_training_components(
+            model,
+            learning_rate=1e-3,
+            num_warmup_steps=0,
+            lr_scheduler="constant",
+            compile_model=True,
+        )
+
+        from torch._dynamo.eval_frame import OptimizedModule
+
+        layers = model.model.layers
+        for idx, block in enumerate(layers):
+            assert isinstance(block, OptimizedModule), f"Block {idx} should be OptimizedModule, got {type(block)}"

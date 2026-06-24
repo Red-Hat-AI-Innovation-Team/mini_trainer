@@ -1408,12 +1408,6 @@ def main(
 
     # validation, do this before continuing execution flow so we don't log experiments that are invalid from
     # the get-go
-    if compile_model and osft:
-        raise ValueError(
-            "--compile-model is not compatible with --osft. "
-            "OSFT uses dynamic forward methods that cannot be traced by torch.compile."
-        )
-
     if compile_model and use_liger_kernels:
         raise ValueError(
             "--compile-model is not compatible with --use-liger-kernels. "

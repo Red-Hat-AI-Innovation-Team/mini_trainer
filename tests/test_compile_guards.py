@@ -10,16 +10,6 @@ import pytest
 
 
 class TestCompileValidationGuards:
-    def test_compile_osft_incompatible(self):
-        compile_model = True
-        osft = True
-        with pytest.raises(ValueError, match="not compatible with --osft"):
-            if compile_model and osft:
-                raise ValueError(
-                    "--compile-model is not compatible with --osft. "
-                    "OSFT uses dynamic forward methods that cannot be traced by torch.compile."
-                )
-
     def test_compile_liger_incompatible(self):
         compile_model = True
         use_liger_kernels = True
@@ -42,10 +32,7 @@ class TestCompileValidationGuards:
 
     def test_compile_guards_do_not_fire_when_disabled(self):
         compile_model = False
-        osft = True
         use_liger_kernels = True
 
-        if compile_model and osft:
-            raise ValueError("should not reach")
         if compile_model and use_liger_kernels:
             raise ValueError("should not reach")
