@@ -22,7 +22,6 @@ import gc
 import json
 import os
 import statistics
-import time
 
 os.environ["TESTING"] = "true"
 
@@ -63,9 +62,9 @@ def run_arm(
     local_rank: int,
 ):
     label = "compiled" if compile_model else "eager"
-    log_rank_0(f"\n{'='*70}")
+    log_rank_0(f"\n{'=' * 70}")
     log_rank_0(f"  {label.upper()} ARM")
-    log_rank_0(f"{'='*70}")
+    log_rank_0(f"{'=' * 70}")
 
     if compile_model:
         torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
@@ -181,7 +180,7 @@ def main():
     seq_lens = [int(s) for s in args.seq_lens.split(",")]
     world_size = dist.get_world_size()
 
-    log_rank_0(f"\nOSFT Compile Benchmark")
+    log_rank_0("\nOSFT Compile Benchmark")
     log_rank_0(f"  Model: {args.model}")
     log_rank_0(f"  GPUs: {world_size}x {torch.cuda.get_device_name(local_rank)}")
     log_rank_0(f"  Seq lengths: {seq_lens}")
@@ -226,12 +225,14 @@ def main():
 
     # Summary table
     if len(modes) == 2 and dist.get_rank() == 0:
-        print(f"\n{'='*70}")
-        print(f"  SUMMARY: OSFT eager vs compiled")
+        print(f"\n{'=' * 70}")
+        print("  SUMMARY: OSFT eager vs compiled")
         print(f"  {args.model} | {world_size} GPUs | batch={args.batch_size}/GPU | rank_ratio={args.osft_rank_ratio}")
-        print(f"{'='*70}")
-        print(f"  {'seq_len':>8}  {'eager_ms':>10}  {'compiled_ms':>12}  {'speedup':>8}  {'tok/s eager':>12}  {'tok/s compiled':>15}")
-        print(f"  {'-'*8}  {'-'*10}  {'-'*12}  {'-'*8}  {'-'*12}  {'-'*15}")
+        print(f"{'=' * 70}")
+        print(
+            f"  {'seq_len':>8}  {'eager_ms':>10}  {'compiled_ms':>12}  {'speedup':>8}  {'tok/s eager':>12}  {'tok/s compiled':>15}"
+        )
+        print(f"  {'-' * 8}  {'-' * 10}  {'-' * 12}  {'-' * 8}  {'-' * 12}  {'-' * 15}")
         for sl in seq_lens:
             e = all_results["eager"][sl]
             c = all_results["compiled"][sl]
@@ -240,7 +241,7 @@ def main():
                 f"  {sl:>8}  {e['median_ms']:>10.1f}  {c['median_ms']:>12.1f}  {speedup:>7.2f}x  "
                 f"{e['tokens_per_sec']:>12.0f}  {c['tokens_per_sec']:>15.0f}"
             )
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
 
     if args.output_json and dist.get_rank() == 0:
         with open(args.output_json, "w") as f:

@@ -334,7 +334,11 @@ class TestOSFTCompile:
         torch.manual_seed(7)
         torch.cuda.manual_seed(7)
         eager_losses, eager_model = _run_steps(
-            model_path, compile_model=False, input_ids=input_ids, labels=labels, osft=True,
+            model_path,
+            compile_model=False,
+            input_ids=input_ids,
+            labels=labels,
+            osft=True,
         )
 
         del eager_model
@@ -346,7 +350,11 @@ class TestOSFTCompile:
         torch.cuda.manual_seed(7)
         torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
         compiled_losses, _ = _run_steps(
-            model_path, compile_model=True, input_ids=input_ids, labels=labels, osft=True,
+            model_path,
+            compile_model=True,
+            input_ids=input_ids,
+            labels=labels,
+            osft=True,
         )
 
         for step, (e, c) in enumerate(zip(eager_losses, compiled_losses)):
