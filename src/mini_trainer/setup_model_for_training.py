@@ -31,7 +31,6 @@ from mini_trainer.vlm_utils import (
     is_vlm_for_direct_loading,
     is_vlm_with_causal_lm,
     load_vlm_for_text_training,
-    needs_sdpa,
 )
 
 
@@ -1043,47 +1042,36 @@ def setup_model(
         except ImportError:
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
 
-    # Check if model requires SDPA instead of Flash Attention 2.
-    # This covers M-RoPE models (3D position_ids) and models with timm vision
-    # towers (TimmWrapperModel rejects flash_attention_2).
-    _needs_sdpa = needs_sdpa(model_config)
-
-    # Handle models that need SDPA (doesn't require flash_attn)
-    if _needs_sdpa:
-        base_model_args["attn_implementation"] = "sdpa"
-        log_rank_0(f"Using SDPA for {model_name_or_path} (model incompatible with Flash Attention 2)")
-    else:
-        # Check if flash_attn is available for non-SDPA models
+    # GPT-OSS models require vllm-flash-attn3 (Hopper+) or eager.
+    # All other models use SDPA, which dispatches to FlashAttention-2
+    # kernels via PyTorch's backend and is compatible with torch.compile.
+    if is_gpt_oss:
         try:
             import flash_attn as _
 
-            if is_gpt_oss:
-                # vllm-flash-attn3 requires Hopper (SM 9.0+) GPUs;
-                # GPT-OSS only supports flash-attn3 or eager
-                major, _ = torch.cuda.get_device_capability(0)
-                if major >= 9:
-                    base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
-                    log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
-                else:
-                    base_model_args["attn_implementation"] = "eager"
-                    log_rank_0(
-                        f"GPT-OSS: flash-attn3 requires Hopper (SM 9.0+) GPUs, "
-                        f"but found SM {major}.x. Using eager attention instead."
-                    )
+            major, _ = torch.cuda.get_device_capability(0)
+            if major >= 9:
+                base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
+                log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
             else:
-                base_model_args["attn_implementation"] = "flash_attention_2"
-
+                base_model_args["attn_implementation"] = "eager"
+                log_rank_0(
+                    f"GPT-OSS: flash-attn3 requires Hopper (SM 9.0+) GPUs, "
+                    f"but found SM {major}.x. Using eager attention instead."
+                )
         except ImportError as e:
             if os.environ.get("TESTING", "false").lower() == "true":
                 base_model_args["attn_implementation"] = "sdpa"
             else:
                 raise e
+    else:
+        base_model_args["attn_implementation"] = "sdpa"
 
     # For models with timm vision towers: set vision config to eager
     # while keeping the text model's attention implementation.
     # timm's TimmWrapperModel rejects both FA2 and SDPA.
     if has_timm_vision_tower(model_config):
-        attn_impl = base_model_args.get("attn_implementation", "flash_attention_2")
+        attn_impl = base_model_args.get("attn_implementation", "sdpa")
         base_model_args["attn_implementation"] = {
             "text_config": attn_impl,
             "vision_config": "eager",
