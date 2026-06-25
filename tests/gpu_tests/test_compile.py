@@ -441,14 +441,7 @@ class TestOSFTCompile:
             assert isinstance(block, OptimizedModule), f"Block {idx} should be OptimizedModule, got {type(block)}"
 
     def test_osft_orthogonality_under_compile(self, saved_model, single_gpu_device):
-        """OSFT subspace orthogonality is preserved under torch.compile.
-
-        Runs 10 training steps with compiled OSFT and checks that gradient
-        and parameter orthogonality are maintained within 1 degree at every
-        step. The optim_wrapper monkey-patch calls project_gradients() and
-        project_parameters() inside optimizer.step(), so checks run after
-        step returns.
-        """
+        """Gradient and parameter orthogonality hold under torch.compile."""
         model_path, config = saved_model
 
         torch.manual_seed(7)
@@ -471,9 +464,8 @@ class TestOSFTCompile:
         )
 
         tracker = OrthogonalityTracker(margin_deg=1.0)
-        num_steps = 10
 
-        for step in range(1, num_steps + 1):
+        for step in range(1, 11):
             input_ids = torch.randint(0, config.vocab_size, (2, 32), device=single_gpu_device)
             labels = input_ids.clone()
 
@@ -481,11 +473,10 @@ class TestOSFTCompile:
             output = model(input_ids=input_ids, labels=labels)
             loss = output.loss.float().sum() / input_ids.shape[0]
             loss.backward()
-
-            # optim_wrapper runs project_gradients → step → project_parameters
             optimizer.step()
             lr_scheduler.step()
 
+            # .grad still holds projected gradients (AdamW doesn't zero in step)
             for module in model.modules():
                 if isinstance(module, OSFTLinear):
                     check_gradient_orthogonality(model, module, step, tracker)

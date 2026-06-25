@@ -134,16 +134,11 @@ class SVDDecompositionDict(SVDDictBase, total=False):
 
 
 class OSFTLinear(nn.Module):
-    """Factorized linear using SVD components: W = U_high @ diag(S_high) @ V_high + U_low @ diag(S_low) @ V_low.
+    """Factorized linear: W = U_high @ diag(S_high) @ V_high + U_low @ diag(S_low) @ V_low.
 
-    Replaces closure-based forward overrides with a proper nn.Module whose
-    forward is pure tensor math — no weakrefs, dict construction, getattr,
-    or runtime .to() calls — so torch.compile can trace it without graph breaks.
-
-    Attribute names (osft_U_high, osft_S_high, osft_V_high, osft_params.U_low,
-    osft_params.S_low, osft_params.V_low) match the existing convention so that
-    project_gradients, project_parameters, get_svd_dict_for_module, and
-    prepare_state_dict_for_save continue to work unchanged.
+    forward() is pure tensor math — torch.compile traces it without graph breaks.
+    Attribute names match the existing convention used by project_gradients,
+    project_parameters, get_svd_dict_for_module, and prepare_state_dict_for_save.
     """
 
     def __init__(self, U_high, S_high, V_high, U_low, S_low, V_low, bias=None, rank_high=None):
@@ -156,12 +151,8 @@ class OSFTLinear(nn.Module):
         osft_params.S_low = S_low
         osft_params.V_low = V_low
         self.osft_params = osft_params
-        # rank_high: full (unsharded) k_high dimension, needed by V all-gather
-        # in project_gradients. Stored as a persistent int buffer so it survives
-        # FSDP2 sharding (S_high.shape[0] becomes the local shard size, not full).
+        # Persistent buffer: FSDP2 shards S_high, so S_high.shape[0] != k_high.
         if rank_high is not None:
-            # Infer device from an existing parameter so the buffer lives on the
-            # same device (meta during lazy init, CPU/CUDA during standard init).
             buf_device = U_high.device
             self.register_buffer(
                 "_rank_high_buf",
@@ -179,10 +170,9 @@ class OSFTLinear(nn.Module):
 
     @property
     def rank_high(self) -> int:
+        """Full (unsharded) k_high. Not safe inside a compiled region (.item() graph break)."""
         if self._rank_high_cached is not None:
             return self._rank_high_cached
-        # Lazy extract after set_model_state_dict materializes the buffer.
-        # Single .item() call, then cached for all subsequent accesses.
         buf = self._rank_high_buf
         if buf is not None and buf.device.type != "meta":
             self._rank_high_cached = buf.item()
@@ -1801,11 +1791,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
         @torch.no_grad()
         def _restore_dense_linears(self):
-            """Replace OSFTLinear modules with standard nn.Linear so that
-            the original parameter FQNs (e.g. ``q_proj.weight``) are restored.
-
-            Must be called before ``_reset_osft_metadata`` clears the registry.
-            """
+            """Replace OSFTLinear → nn.Linear before re-decomposition. Must run before _reset_osft_metadata."""
             for orig_key, spec in self.osft_paramspec_registry.items():
                 mod_path = orig_key.rsplit(".", 1)[0]
                 parent, child_name = self._get_module_by_name(mod_path)
@@ -1916,10 +1902,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             return sd
 
         def _prepare_osft_param(self, logical_key: str):
-            """
-            Prepares an OSFT parameter by replacing the Linear module with an
-            OSFTLinear at the same position in the module tree.
-            """
+            """Replace nn.Linear at logical_key with an OSFTLinear."""
             mod, attr = self._get_module_by_name(logical_key)
             if mod is None:
                 raise ValueError(f"requested module {logical_key} but could not be found")
@@ -2073,10 +2056,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         output_dtype=self.output_dtype,
                     )
 
-                    # Move SVD results back to the original parameter's device.
-                    # SVD runs on GPU for speed, but the module should live where
-                    # its predecessor lived.  FSDP2 handles final placement.
-                    # Tensor.to() across devices strips nn.Parameter, so re-wrap.
+                    # .to() across devices strips nn.Parameter — re-wrap.
                     orig_device = param.device
                     for key in svd_dict:
                         if isinstance(svd_dict[key], torch.Tensor):

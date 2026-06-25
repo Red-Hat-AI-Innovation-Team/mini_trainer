@@ -1043,8 +1043,8 @@ def setup_model(
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
 
     # GPT-OSS models require vllm-flash-attn3 (Hopper+) or eager.
-    # All other models use SDPA, which dispatches to FlashAttention-2
-    # kernels via PyTorch's backend and is compatible with torch.compile.
+    # All other models use SDPA, which is compatible with torch.compile
+    # (HF's flash_attention path has a data-dependent graph break).
     if is_gpt_oss:
         try:
             import flash_attn  # noqa: F401
