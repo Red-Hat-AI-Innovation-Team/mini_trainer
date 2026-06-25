@@ -1047,7 +1047,7 @@ def setup_model(
     # kernels via PyTorch's backend and is compatible with torch.compile.
     if is_gpt_oss:
         try:
-            import flash_attn as _
+            import flash_attn  # noqa: F401
 
             major, _ = torch.cuda.get_device_capability(0)
             if major >= 9:
