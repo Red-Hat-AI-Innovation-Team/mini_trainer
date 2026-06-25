@@ -135,14 +135,11 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
     default_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
 
     def _is_osft_owned_attribute(module: torch.nn.Module, name: str) -> bool:
-        if name.startswith("osft_") or name in {"U_low", "S_low", "V_low", "rank_high"}:
+        if name.startswith("osft_") or name.startswith("_rank_high"):
             return True
-        return hasattr(module, "osft_params") and name in {
-            "U_low",
-            "S_low",
-            "V_low",
-            "rank_high",
-        }
+        if hasattr(module, "osft_params") and name in {"U_low", "S_low", "V_low"}:
+            return True
+        return False
 
     for module in model.modules():
         # collect available candidates from this module
