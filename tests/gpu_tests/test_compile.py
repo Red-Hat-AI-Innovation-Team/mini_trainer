@@ -11,8 +11,14 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
+from mini_trainer.osft_utils import OSFTLinear
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.utils import patch_target_module
+from tests.test_utils.orthogonality import (
+    OrthogonalityTracker,
+    check_gradient_orthogonality,
+    check_parameter_orthogonality,
+)
 
 
 def create_tiny_llama_model():
@@ -433,3 +439,56 @@ class TestOSFTCompile:
         layers = model.model.layers
         for idx, block in enumerate(layers):
             assert isinstance(block, OptimizedModule), f"Block {idx} should be OptimizedModule, got {type(block)}"
+
+    def test_osft_orthogonality_under_compile(self, saved_model, single_gpu_device):
+        """OSFT subspace orthogonality is preserved under torch.compile.
+
+        Runs 10 training steps with compiled OSFT and checks that gradient
+        and parameter orthogonality are maintained within 1 degree at every
+        step. The optim_wrapper monkey-patch calls project_gradients() and
+        project_parameters() inside optimizer.step(), so checks run after
+        step returns.
+        """
+        model_path, config = saved_model
+
+        torch.manual_seed(7)
+        torch.cuda.manual_seed(7)
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+
+        model = setup_model(
+            model_name_or_path=str(model_path),
+            use_liger_kernels=False,
+            osft=True,
+            osft_rank_ratio=0.25,
+            local_rank=0,
+        )
+        model, optimizer, lr_scheduler = setup_training_components(
+            model,
+            learning_rate=1e-3,
+            num_warmup_steps=0,
+            lr_scheduler="constant",
+            compile_model=True,
+        )
+
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+        num_steps = 10
+
+        for step in range(1, num_steps + 1):
+            input_ids = torch.randint(0, config.vocab_size, (2, 32), device=single_gpu_device)
+            labels = input_ids.clone()
+
+            optimizer.zero_grad()
+            output = model(input_ids=input_ids, labels=labels)
+            loss = output.loss.float().sum() / input_ids.shape[0]
+            loss.backward()
+
+            # optim_wrapper runs project_gradients → step → project_parameters
+            optimizer.step()
+            lr_scheduler.step()
+
+            for module in model.modules():
+                if isinstance(module, OSFTLinear):
+                    check_gradient_orthogonality(model, module, step, tracker)
+                    check_parameter_orthogonality(model, module, step, tracker)
+
+        assert tracker.is_successful(), f"Orthogonality violated under compile:\n{tracker.get_summary()}"
