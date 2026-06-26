@@ -836,7 +836,7 @@ def train(
     # control args
     world_size = int(os.environ["WORLD_SIZE"])
     is_local_main_process = int(os.getenv("LOCAL_RANK", 0)) == 0
-    is_main_process = int(os.getenv("RANK", 0)) == 0
+    is_main_process = dist.get_rank() == 0
     metric_logger = AsyncStructuredLogger(
         output_dir + f"/training_metrics_{get_node_rank()}.jsonl",
         use_wandb=use_wandb,

@@ -394,7 +394,7 @@ class TestSerialization:
 
     def test_deserialize_invalid_base64(self):
         """Test that invalid base64 input raises an exception."""
-        with pytest.raises(Exception):
+        with pytest.raises((ValueError, UnicodeDecodeError)):
             deserialize_callback("not-valid-base64!!!")
 
     def test_empty_callbacks_list(self):
