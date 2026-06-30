@@ -1336,9 +1336,13 @@ def main(
     ] = "float32",
     # validation parameters
     validation_split: Annotated[float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")] = 0.0,
+    validation_data_path: Annotated[
+        str | None,
+        Option(help="Path to a separate validation dataset (JSONL). Mutually exclusive with validation_split"),
+    ] = None,
     validation_frequency: Annotated[
         int | None,
-        Option(help="Frequency of validation evaluation (in steps). Required when validation_split > 0"),
+        Option(help="Frequency of validation evaluation (in steps). Required when validation_split > 0 or validation_data_path is provided"),
     ] = None,
     # checkpoint parameters
     save_best_val_loss: Annotated[
@@ -1417,8 +1421,12 @@ def main(
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError("validation_split must be between 0.0 and 1.0 (exclusive)")
 
-    if validation_split > 0.0 and (validation_frequency is None or validation_frequency <= 0):
-        raise ValueError("validation_frequency must be provided and positive when validation_split > 0")
+    if validation_data_path and validation_split > 0.0:
+        raise ValueError("validation_data_path and validation_split are mutually exclusive")
+
+    has_validation = validation_split > 0.0 or validation_data_path is not None
+    if has_validation and (validation_frequency is None or validation_frequency <= 0):
+        raise ValueError("validation_frequency must be provided and positive when using validation")
 
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
@@ -1460,6 +1468,7 @@ def main(
             "checkpoint_at_epoch": checkpoint_at_epoch,
             "save_final_checkpoint": save_final_checkpoint,
             "validation_split": validation_split,
+            "validation_data_path": validation_data_path,
             "validation_frequency": validation_frequency,
             "save_best_val_loss": save_best_val_loss,
             "val_loss_improvement_threshold": val_loss_improvement_threshold,
@@ -1579,11 +1588,15 @@ def main(
         seed=seed,
         pad_token_id=getattr(getattr(model.config, "text_config", model.config), "pad_token_id", None),
         validation_split=validation_split,
+        validation_data_path=validation_data_path,
         pretraining_config=pretraining_config,
     )
 
-    if validation_split > 0.0:
-        log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
+    if val_data_loader is not None:
+        if validation_data_path:
+            log_rank_0(f"Using separate validation dataset from {validation_data_path}")
+        else:
+            log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
         log_rank_0(f"Validation data loader length: {len(val_data_loader)}")
         log_rank_0(f"Training data loader length: {len(data_loader)}")
     else:

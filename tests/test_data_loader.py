@@ -1018,6 +1018,100 @@ class TestGetDataLoader:
         finally:
             os.unlink(temp_path)
 
+    def test_validation_data_path_loads_separate_dataset(self, temp_data_file):
+        """Test that validation_data_path loads a separate dataset for validation."""
+        val_data = [
+            {
+                "input_ids": list(range(50, 80)),
+                "labels": list(range(50, 80)),
+                "len": 30,
+                "num_loss_counted_tokens": 30,
+            }
+            for _ in range(5)
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for item in val_data:
+                json.dump(item, f)
+                f.write("\n")
+            val_path = f.name
+
+        try:
+            train_loader, val_loader = get_data_loader(
+                data_path=temp_data_file,
+                batch_size=2,
+                max_tokens_per_gpu=500,
+                seed=42,
+                validation_data_path=val_path,
+                rank=0,
+                world_size=1,
+            )
+
+            assert train_loader is not None
+            assert val_loader is not None
+            assert len(train_loader.dataset) == 10
+            assert len(val_loader.dataset) == 5
+        finally:
+            os.unlink(val_path)
+
+    def test_validation_data_path_and_split_mutually_exclusive(self, temp_data_file):
+        """Test that providing both validation_data_path and validation_split raises an error."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            json.dump({"input_ids": [1, 2], "labels": [1, 2], "len": 2, "num_loss_counted_tokens": 2}, f)
+            val_path = f.name
+
+        try:
+            with pytest.raises(
+                ValueError,
+                match="validation_data_path and validation_split are mutually exclusive",
+            ):
+                get_data_loader(
+                    data_path=temp_data_file,
+                    batch_size=2,
+                    max_tokens_per_gpu=500,
+                    seed=42,
+                    validation_split=0.2,
+                    validation_data_path=val_path,
+                    rank=0,
+                    world_size=1,
+                )
+        finally:
+            os.unlink(val_path)
+
+    def test_validation_data_path_without_split_uses_all_train_data(self, temp_data_file):
+        """Test that validation_data_path does not split training data."""
+        val_data = [
+            {
+                "input_ids": list(range(200, 210)),
+                "labels": list(range(200, 210)),
+                "len": 10,
+                "num_loss_counted_tokens": 10,
+            }
+            for _ in range(3)
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for item in val_data:
+                json.dump(item, f)
+                f.write("\n")
+            val_path = f.name
+
+        try:
+            train_loader, val_loader = get_data_loader(
+                data_path=temp_data_file,
+                batch_size=2,
+                max_tokens_per_gpu=500,
+                seed=42,
+                validation_data_path=val_path,
+                rank=0,
+                world_size=1,
+            )
+
+            # All 10 samples should be in training (no split)
+            assert len(train_loader.dataset) == 10
+            # Validation should have the 3 samples from the separate file
+            assert len(val_loader.dataset) == 3
+        finally:
+            os.unlink(val_path)
+
 
 class TestResetMinibatches:
     """Test suite for the reset_minibatches utility function."""

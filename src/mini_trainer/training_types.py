@@ -183,9 +183,15 @@ class TrainingArgs:
             "help": "The fraction of data to use for validation. 0.0 means no validation, 0.1 means 10% of the data is used for validation."
         },
     )
+    validation_data_path: str | None = field(
+        default=None,
+        metadata={
+            "help": "Path to a separate validation dataset (JSONL). Mutually exclusive with validation_split."
+        },
+    )
     validation_frequency: int | None = field(
         default=None,
-        metadata={"help": "The frequency of validation in steps. Required when validation_split > 0."},
+        metadata={"help": "The frequency of validation in steps. Required when validation_split > 0 or validation_data_path is provided."},
     )
 
     # Pretraining configuration (None = instruction tuning, non-None = pretraining)

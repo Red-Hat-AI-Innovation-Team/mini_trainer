@@ -149,8 +149,13 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
             command.append(f"--mlflow-run-name={train_args.mlflow_run_name}")
 
     # validation-related arguments
+    if train_args.validation_data_path:
+        command.append(f"--validation-data-path={train_args.validation_data_path}")
     if train_args.validation_split > 0.0:
         command.append(f"--validation-split={train_args.validation_split}")
+
+    has_validation = train_args.validation_split > 0.0 or train_args.validation_data_path is not None
+    if has_validation:
         if train_args.validation_frequency is not None:
             command.append(f"--validation-frequency={train_args.validation_frequency}")
 

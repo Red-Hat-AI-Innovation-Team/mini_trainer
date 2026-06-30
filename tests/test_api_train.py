@@ -525,6 +525,35 @@ class TestRunTraining:
             assert "--osft-unfreeze-rank-ratio=0.3" in command
 
     @patch("mini_trainer.api_train.StreamablePopen")
+    def test_run_training_validation_data_path(self, mock_popen_class):
+        """Test that validation_data_path is forwarded to the training command."""
+        mock_popen = MagicMock()
+        mock_popen.poll.return_value = 0
+        mock_popen_class.return_value = mock_popen
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_data_path="/data/eval.jsonl",
+                validation_frequency=10,
+            )
+
+            run_training(torch_args, train_args)
+
+            call_args = mock_popen_class.call_args
+            _, command = call_args[0]
+            assert "--validation-data-path=/data/eval.jsonl" in command
+            assert "--validation-frequency=10" in command
+            # Should NOT have validation-split since it's 0.0
+            assert not any(arg.startswith("--validation-split=") for arg in command)
+
+    @patch("mini_trainer.api_train.StreamablePopen")
     def test_run_training_keyboard_interrupt(self, mock_popen_class):
         """Test that run_training handles keyboard interrupt properly."""
         mock_popen = MagicMock()
