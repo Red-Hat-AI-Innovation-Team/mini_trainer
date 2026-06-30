@@ -185,13 +185,13 @@ class TrainingArgs:
     )
     validation_data_path: str | None = field(
         default=None,
-        metadata={
-            "help": "Path to a separate validation dataset (JSONL). Mutually exclusive with validation_split."
-        },
+        metadata={"help": "Path to a separate validation dataset (JSONL). Mutually exclusive with validation_split."},
     )
     validation_frequency: int | None = field(
         default=None,
-        metadata={"help": "The frequency of validation in steps. Required when validation_split > 0 or validation_data_path is provided."},
+        metadata={
+            "help": "The frequency of validation in steps. Required when validation_split > 0 or validation_data_path is provided."
+        },
     )
 
     # Pretraining configuration (None = instruction tuning, non-None = pretraining)

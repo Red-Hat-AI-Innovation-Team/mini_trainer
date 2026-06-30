@@ -78,19 +78,44 @@ class TrainerCallback:
     constructors must work with no arguments (or all-default arguments).
     """
 
-    def on_train_begin(self, context: TrainingContext) -> None: pass
-    def on_epoch_begin(self, context: TrainingContext) -> None: pass
-    def on_step_begin(self, context: TrainingContext) -> None: pass
-    def on_before_forward(self, context: TrainingContext) -> None: pass
-    def on_after_backward(self, context: TrainingContext) -> None: pass
-    def on_pre_optimizer_step(self, context: TrainingContext) -> None: pass
-    def on_optimizer_step(self, context: TrainingContext) -> None: pass
-    def on_log(self, context: TrainingContext) -> None: pass
-    def on_evaluate(self, context: TrainingContext) -> None: pass
-    def on_save(self, context: TrainingContext) -> None: pass
-    def on_step_end(self, context: TrainingContext) -> None: pass
-    def on_epoch_end(self, context: TrainingContext) -> None: pass
-    def on_train_end(self, context: TrainingContext) -> None: pass
+    def on_train_begin(self, context: TrainingContext) -> None:
+        pass
+
+    def on_epoch_begin(self, context: TrainingContext) -> None:
+        pass
+
+    def on_step_begin(self, context: TrainingContext) -> None:
+        pass
+
+    def on_before_forward(self, context: TrainingContext) -> None:
+        pass
+
+    def on_after_backward(self, context: TrainingContext) -> None:
+        pass
+
+    def on_pre_optimizer_step(self, context: TrainingContext) -> None:
+        pass
+
+    def on_optimizer_step(self, context: TrainingContext) -> None:
+        pass
+
+    def on_log(self, context: TrainingContext) -> None:
+        pass
+
+    def on_evaluate(self, context: TrainingContext) -> None:
+        pass
+
+    def on_save(self, context: TrainingContext) -> None:
+        pass
+
+    def on_step_end(self, context: TrainingContext) -> None:
+        pass
+
+    def on_epoch_end(self, context: TrainingContext) -> None:
+        pass
+
+    def on_train_end(self, context: TrainingContext) -> None:
+        pass
 
 
 class CallbackManager:
@@ -209,9 +234,10 @@ def deserialize_callback(encoded: str) -> TrainerCallback:
     source = base64.b64decode(encoded).decode("utf-8")
     namespace: dict[str, Any] = {"TrainerCallback": TrainerCallback, "TrainingContext": TrainingContext}
     # Only called with source from api_train.py serialization, never untrusted input
-    exec(source, namespace)  # noqa: S102
+    exec(source, namespace)
     classes = [
-        v for v in namespace.values()
+        v
+        for v in namespace.values()
         if isinstance(v, type) and issubclass(v, TrainerCallback) and v is not TrainerCallback
     ]
     if len(classes) != 1:

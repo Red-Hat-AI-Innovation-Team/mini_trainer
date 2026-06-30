@@ -741,6 +741,7 @@ def train(
     # control args
     world_size = int(os.environ["WORLD_SIZE"])
     is_local_main_process = int(os.getenv("LOCAL_RANK", 0)) == 0
+    is_main_process = int(os.getenv("RANK", 0)) == 0
     metric_logger = AsyncStructuredLogger(
         output_dir + f"/training_metrics_{get_node_rank()}.jsonl",
         use_wandb=use_wandb,
@@ -1342,7 +1343,9 @@ def main(
     ] = None,
     validation_frequency: Annotated[
         int | None,
-        Option(help="Frequency of validation evaluation (in steps). Required when validation_split > 0 or validation_data_path is provided"),
+        Option(
+            help="Frequency of validation evaluation (in steps). Required when validation_split > 0 or validation_data_path is provided"
+        ),
     ] = None,
     # checkpoint parameters
     save_best_val_loss: Annotated[
@@ -1421,7 +1424,7 @@ def main(
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError("validation_split must be between 0.0 and 1.0 (exclusive)")
 
-    if validation_data_path and validation_split > 0.0:
+    if validation_data_path is not None and validation_split > 0.0:
         raise ValueError("validation_data_path and validation_split are mutually exclusive")
 
     has_validation = validation_split > 0.0 or validation_data_path is not None
@@ -1593,7 +1596,7 @@ def main(
     )
 
     if val_data_loader is not None:
-        if validation_data_path:
+        if validation_data_path is not None:
             log_rank_0(f"Using separate validation dataset from {validation_data_path}")
         else:
             log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")

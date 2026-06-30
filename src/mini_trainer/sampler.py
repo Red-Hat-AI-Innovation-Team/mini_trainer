@@ -676,7 +676,7 @@ def get_data_loader(
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError(f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}")
 
-    if validation_data_path and validation_split > 0.0:
+    if validation_data_path is not None and validation_split > 0.0:
         raise ValueError("validation_data_path and validation_split are mutually exclusive")
 
     # Create dataset based on mode
