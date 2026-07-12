@@ -1325,13 +1325,20 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if fsdp2_lazy_init:
                 # memory-efficient distributed loading
                 log_rank_0("🧠 distributed environment detected, using memory-efficient loading strategy")
+                resolved_train_dtype = base_kwargs.get("torch_dtype", torch.float32)
+                if "torch_dtype" not in base_kwargs:
+                    log_rank_0(
+                        "⚠️ torch_dtype not set — defaulting to float32 for memory-efficient loading. "
+                        "This may use more memory than necessary in distributed training; "
+                        "consider setting torch_dtype to bfloat16."
+                    )
                 model = _load_model_memory_efficient(
                     actual_osft_cls,
                     pretrained_model_name_or_path,
                     model_args,
                     base_kwargs,
                     osft_class_kwargs,
-                    train_dtype=base_kwargs.get("torch_dtype", torch.float32),
+                    train_dtype=resolved_train_dtype,
                 )
             else:
                 # standard non-distributed loading
