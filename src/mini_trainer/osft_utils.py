@@ -913,6 +913,7 @@ def _load_model_memory_efficient(
     model_args: tuple,
     base_kwargs: dict,
     osft_class_kwargs: dict,
+    train_dtype: torch.dtype = torch.float32,
 ):
     """
     Memory-efficient loading for OSFT models to avoid CUDA/CPU OOM.
@@ -927,8 +928,8 @@ def _load_model_memory_efficient(
         pretrained_model_name_or_path: Model path or name
         model_args: Positional arguments for model loading
         base_kwargs: Base model kwargs (already filtered)
-        init_cfg: OSFT configuration
         osft_class_kwargs: OSFT class-specific parameters
+        train_dtype: Training dtype for model parameters
 
     Returns:
         Loaded OSFT model
@@ -952,12 +953,14 @@ def _load_model_memory_efficient(
     # Remove additional OSFT parameters before calling base model's from_pretrained
     final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
 
-    # Force CPU loading via default behavior and match the train_dtype for FSDP2
-    # Need to get train_dtype from base_kwargs or default to float32
-    load_dtype = base_kwargs.get("torch_dtype")
-    if load_dtype is None:
-        raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
-    final_base_kwargs["torch_dtype"] = load_dtype
+    # Force CPU loading in the training dtype for FSDP2
+    if train_dtype == torch.float32 and "torch_dtype" not in base_kwargs:
+        log_rank_0(
+            "⚠️ torch_dtype not set — defaulting to float32 for memory-efficient loading. "
+            "This may use more memory than necessary in distributed training; "
+            "consider setting torch_dtype to bfloat16."
+        )
+    final_base_kwargs["torch_dtype"] = train_dtype
 
     # initialize params to instance the OSFT model
     # global rank 0 process actually loads the model, and all other procs
@@ -974,7 +977,7 @@ def _load_model_memory_efficient(
 
     if dist.get_rank() == 0:
         with torch.no_grad():
-            log_rank_0(f"📥 Loading base model to CPU in {load_dtype}...")
+            log_rank_0(f"📥 Loading base model to CPU in {train_dtype}...")
 
             # Check if this is a VLM wrapping a CausalLM text backbone
             _is_vlm = False
@@ -1333,6 +1336,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     model_args,
                     base_kwargs,
                     osft_class_kwargs,
+                    train_dtype=base_kwargs.get("torch_dtype", torch.float32),
                 )
             else:
                 # standard non-distributed loading
