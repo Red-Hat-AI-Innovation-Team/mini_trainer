@@ -6,7 +6,6 @@ context with snapshot isolation, class-based interface, and serialization
 for crossing the torchrun subprocess boundary.
 """
 
-import asyncio
 import logging
 import threading
 import time

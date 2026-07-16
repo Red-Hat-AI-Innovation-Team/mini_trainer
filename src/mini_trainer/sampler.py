@@ -642,6 +642,7 @@ def get_data_loader(
     dummy_sample: dict | None = None,
     num_workers: int = 0,
     validation_split: float = 0.0,
+    validation_data_path: str | None = None,
     max_seq_len: int | None = None,
     pretraining_config: PretrainingConfig | None = None,
     pad_token_id: int = 0,
@@ -661,17 +662,22 @@ def get_data_loader(
         dummy_sample: Sample to use for padding when ranks have uneven data
         num_workers: Number of worker processes for data loading
         validation_split: Fraction of data to use for validation (0.0 to 1.0)
+        validation_data_path: Path to a separate validation dataset (JSONL).
+            Mutually exclusive with validation_split.
         max_seq_len: Maximum sequence length to keep (filters out longer sequences)
         pretraining_config: Configuration for pretraining mode. If provided, enables
             pretraining with block-based sampling.
         pad_token_id: Token id to use for padding in padded batches.
     Returns:
         tuple: (train_loader, val_loader) where val_loader is None if validation_split <= 0
-            or if in pretraining mode
+            and validation_data_path is None
     """
     # Validate parameters
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError(f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}")
+
+    if validation_data_path is not None and validation_split > 0.0:
+        raise ValueError("validation_data_path and validation_split are mutually exclusive")
 
     # Create dataset based on mode
     if pretraining_config is not None:
@@ -702,6 +708,26 @@ def get_data_loader(
             log_rank_0(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples")
         else:
             log_rank_0(f"Dataset split: {len(train_dataset)} train")
+
+    # Load a separate validation dataset if provided (overrides split-based val_dataset)
+    if validation_data_path is not None:
+        if pretraining_config is not None:
+            separate_val, _ = PretrainingBlockDataset.load_and_split(
+                data_path=validation_data_path,
+                block_size=pretraining_config.block_size,
+                pad_token_id=pad_token_id,
+                validation_split=0.0,
+                seed=seed,
+            )
+        else:
+            separate_val, _ = JsonlDataset.load_and_split(
+                data_path=validation_data_path,
+                validation_split=0.0,
+                max_seq_len=max_seq_len,
+                seed=seed,
+            )
+        val_dataset = separate_val
+        log_rank_0(f"Loaded separate validation dataset: {len(val_dataset)} samples from {validation_data_path}")
 
     # Create collate function
     collate_fn = MaxTokensPerRankCollator(
