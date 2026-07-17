@@ -1676,13 +1676,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         # all of these are ignored
                         continue
 
-                    # convert dtype to match what was registered during initialization
                     param_value = og_state_dict.pop(lk)
-                    expected_dtype = spec.dtype
-                    if param_value.dtype != expected_dtype:
-                        log_rank_0(f"Converting {lk} from {param_value.dtype} to {expected_dtype}")
-                        param_value = param_value.to(dtype=expected_dtype)
-
                     non_osft_sd[lk] = param_value
 
             # now the rank 0 proc shares the state dict
