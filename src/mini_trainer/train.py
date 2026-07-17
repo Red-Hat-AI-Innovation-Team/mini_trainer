@@ -363,9 +363,6 @@ def compute_validation_loss(model, val_data_loader, device):
                 loss = output.loss.float().sum()
                 loss_metrics = loss.detach().item()
 
-                # Clear cache after each minibatch to prevent OOM
-                torch.cuda.empty_cache()
-
                 val_batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
                     num_total_tokens=mb["input_ids"].numel(),
@@ -944,23 +941,19 @@ def train(
 
                 # Ensure scalar loss even if model returns per-token loss
                 loss = (loss / batch_num_loss_counted_tokens) * world_size
-                loss_metrics = loss.detach().cpu().item()
+                loss_metrics = loss.detach().item()
                 loss.backward()
 
                 if callback_manager and callback_manager.has_callbacks("on_after_backward"):
                     callback_manager.context.loss = loss_metrics
                     callback_manager.fire("on_after_backward")
 
-                torch.cuda.empty_cache()
-
                 batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
                     num_total_tokens=mb["input_ids"].shape[1],
                     num_samples=mb_num_samples,
                     loss=loss_metrics,
-                    # since FSDP2 automatically averages gradients by the world-size,
-                    # each rank's gradient contributes 1/8 to the backward
-                    loss_backward=loss.detach().item() / world_size,
+                    loss_backward=loss_metrics / world_size,
                     time_per_minibatch=time.time() - mb_start_time,
                 )
 
@@ -1076,6 +1069,14 @@ def train(
                 metric_logger.log_sync(batch_metrics)
 
             dist.barrier()
+
+            if step == 1 and is_local_main_process and torch.cuda.is_available():
+                peak_gb = batch_metrics["peak_memory_usage_GB"]
+                gpu_total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+                utilization = peak_gb / gpu_total_gb
+                log_rank_0(
+                    f"Memory after step 1: {peak_gb:.1f}GB / {gpu_total_gb:.1f}GB ({utilization:.0%} utilization)"
+                )
 
             # On-demand full-state checkpoint check
             if full_state_checkpointer is not None and full_state_checkpointer.should_save(device):
@@ -1284,6 +1285,7 @@ def main(
     beta2: Annotated[float, Option(help="AdamW beta2 parameter (RMSprop coefficient)")] = 0.95,
     eps: Annotated[float, Option(help="AdamW epsilon for numerical stability")] = 1e-8,
     weight_decay: Annotated[float, Option(help="AdamW weight decay (L2 penalty)")] = 0.0,
+    compile_model: Annotated[bool, Option(help="Compile transformer blocks with torch.compile")] = False,
     use_liger_kernels: Annotated[bool, Option(help="Whether to use Liger kernels")] = False,
     osft: Annotated[bool, Option(help="Enable OSFT (Orthogonal Subspace Fine-Tuning)")] = False,
     osft_unfreeze_rank_ratio: Annotated[
@@ -1413,6 +1415,12 @@ def main(
 
     # validation, do this before continuing execution flow so we don't log experiments that are invalid from
     # the get-go
+    if compile_model and use_liger_kernels:
+        raise ValueError(
+            "--compile-model is not compatible with --use-liger-kernels. "
+            "Both replace the same memory-bound ops; the interaction is untested."
+        )
+
     if osft:
         if osft_unfreeze_rank_ratio is None:
             raise ValueError("osft_unfreeze_rank_ratio is required when osft is True")
@@ -1576,6 +1584,19 @@ def main(
                             model.resize_token_embeddings(ckpt_embed_size)
                     break
 
+    if compile_model:
+        moe_classes = ("MixtralForCausalLM", "GraniteMoeHybridForCausalLM")
+        if model.__class__.__name__ in moe_classes:
+            raise ValueError(
+                f"--compile-model is not compatible with MoE architecture {model.__class__.__name__}. "
+                "MoE router logic causes graph breaks with fullgraph=True."
+            )
+        # Defensive: not required on current PyTorch but may be needed on
+        # future versions where AC's RNG side effects cause graph breaks.
+        # See test_compile_works_without_dynamo_config_flag.
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+        torch._inductor.config.unsafe_skip_cache_dynamic_shape_guards = True
+
     # Create PretrainingConfig if block_size is provided
     pretraining_config = None
     if block_size is not None:
@@ -1629,6 +1650,7 @@ def main(
         eps=eps,
         weight_decay=weight_decay,
         resume_from_checkpoint=resume_from_full_state_checkpoint,
+        compile_model=compile_model,
     )
 
     # Reconstruct callbacks from serialized CLI arg

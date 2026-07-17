@@ -31,7 +31,6 @@ from mini_trainer.vlm_utils import (
     is_vlm_for_direct_loading,
     is_vlm_with_causal_lm,
     load_vlm_for_text_training,
-    needs_sdpa,
 )
 
 
@@ -136,14 +135,11 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
     default_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
 
     def _is_osft_owned_attribute(module: torch.nn.Module, name: str) -> bool:
-        if name.startswith("osft_") or name in {"U_low", "S_low", "V_low", "rank_high"}:
+        if name.startswith("osft_") or name.startswith("_rank_high"):
             return True
-        return hasattr(module, "osft_params") and name in {
-            "U_low",
-            "S_low",
-            "V_low",
-            "rank_high",
-        }
+        if hasattr(module, "osft_params") and name in {"U_low", "S_low", "V_low"}:
+            return True
+        return False
 
     for module in model.modules():
         # collect available candidates from this module
@@ -415,7 +411,7 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
     return context
 
 
-def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
+def wrap_fsdp2(model: torch.nn.Module, compile_model: bool = False) -> torch.nn.Module:
     """
     Phase 2: Pure FSDP2 wrapping with activation checkpointing.
 
@@ -427,6 +423,8 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     Args:
         model: Model to wrap with FSDP2 (should already have buffers materialized)
+        compile_model: If True, compile each transformer block with torch.compile
+            (fullgraph=True, dynamic=True) between AC wrapping and FSDP2 sharding.
 
     Returns:
         FSDP2-wrapped model
@@ -481,6 +479,12 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
         for idx, block in enumerate(layers):
             # preserve_rng_state needs to be true so that the backward pass can be accurate
             layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
+
+    # Apply torch.compile to each block (after AC, before FSDP2)
+    if compile_model:
+        log_rank_0(f"🔄 [Phase 2] Compiling {len(layers)} transformer blocks with torch.compile")
+        for idx, block in enumerate(layers):
+            layers[idx] = torch.compile(block, fullgraph=True, dynamic=True)
 
     # Build 1D device mesh over all ranks
     world_size = dist.get_world_size()
@@ -1035,47 +1039,36 @@ def setup_model(
         except ImportError:
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
 
-    # Check if model requires SDPA instead of Flash Attention 2.
-    # This covers M-RoPE models (3D position_ids) and models with timm vision
-    # towers (TimmWrapperModel rejects flash_attention_2).
-    _needs_sdpa = needs_sdpa(model_config)
-
-    # Handle models that need SDPA (doesn't require flash_attn)
-    if _needs_sdpa:
-        base_model_args["attn_implementation"] = "sdpa"
-        log_rank_0(f"Using SDPA for {model_name_or_path} (model incompatible with Flash Attention 2)")
-    else:
-        # Check if flash_attn is available for non-SDPA models
+    # GPT-OSS models require vllm-flash-attn3 (Hopper+) or eager.
+    # All other models use SDPA, which is compatible with torch.compile
+    # (HF's flash_attention path has a data-dependent graph break).
+    if is_gpt_oss:
         try:
-            import flash_attn as _
+            import flash_attn  # noqa: F401
 
-            if is_gpt_oss:
-                # vllm-flash-attn3 requires Hopper (SM 9.0+) GPUs;
-                # GPT-OSS only supports flash-attn3 or eager
-                major, _ = torch.cuda.get_device_capability(0)
-                if major >= 9:
-                    base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
-                    log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
-                else:
-                    base_model_args["attn_implementation"] = "eager"
-                    log_rank_0(
-                        f"GPT-OSS: flash-attn3 requires Hopper (SM 9.0+) GPUs, "
-                        f"but found SM {major}.x. Using eager attention instead."
-                    )
+            major, _ = torch.cuda.get_device_capability(0)
+            if major >= 9:
+                base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
+                log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
             else:
-                base_model_args["attn_implementation"] = "flash_attention_2"
-
+                base_model_args["attn_implementation"] = "eager"
+                log_rank_0(
+                    f"GPT-OSS: flash-attn3 requires Hopper (SM 9.0+) GPUs, "
+                    f"but found SM {major}.x. Using eager attention instead."
+                )
         except ImportError as e:
             if os.environ.get("TESTING", "false").lower() == "true":
                 base_model_args["attn_implementation"] = "sdpa"
             else:
                 raise e
+    else:
+        base_model_args["attn_implementation"] = "sdpa"
 
     # For models with timm vision towers: set vision config to eager
     # while keeping the text model's attention implementation.
     # timm's TimmWrapperModel rejects both FA2 and SDPA.
     if has_timm_vision_tower(model_config):
-        attn_impl = base_model_args.get("attn_implementation", "flash_attention_2")
+        attn_impl = base_model_args.get("attn_implementation", "sdpa")
         base_model_args["attn_implementation"] = {
             "text_config": attn_impl,
             "vision_config": "eager",
@@ -1262,11 +1255,6 @@ def setup_model(
             to_print=True,
         )
 
-    # NOTE: Don't enable HuggingFace gradient checkpointing with FSDP2
-    # It causes conflicts. TorchTitan applies PyTorch's checkpoint wrapper
-    # BEFORE FSDP2 wrapping if needed.
-    # model.gradient_checkpointing_enable()
-    # torch.compile(model)
     return model
 
 
@@ -1283,13 +1271,14 @@ def setup_training_components(
     eps: float = 1e-8,
     weight_decay: float = 0.0,
     resume_from_checkpoint: str | None = None,
+    compile_model: bool = False,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
 
     This function orchestrates the three-phase model initialization pipeline:
     1. Phase 1: Prepare model for FSDP2 (extract state dicts, materialize buffers)
-    2. Phase 2: Pure FSDP2 wrapping (activation checkpointing + sharding)
+    2. Phase 2: Pure FSDP2 wrapping (activation checkpointing + compilation + sharding)
     3. Phase 3: Finalize initialization (distribute weights, compute SVD for OSFT)
 
     Args:
@@ -1299,6 +1288,7 @@ def setup_training_components(
         lr_scheduler: Type of learning rate scheduler to use
         num_training_steps: Total number of training steps (required for some schedulers)
         scheduler_kwargs: Additional scheduler-specific keyword arguments
+        compile_model: Whether to compile transformer blocks with torch.compile
 
     Returns:
         Tuple of (wrapped_model, optimizer, lr_scheduler)
@@ -1313,8 +1303,8 @@ def setup_training_components(
     init_context = prepare_model_for_fsdp2(model)
     init_context.resume_from_checkpoint = resume_from_checkpoint
 
-    # Phase 2: Pure FSDP2 wrapping
-    model = wrap_fsdp2(model)
+    # Phase 2: Pure FSDP2 wrapping (+ optional compilation)
+    model = wrap_fsdp2(model, compile_model=compile_model)
 
     # Phase 3: Finalize model initialization (distribute weights)
     model = finalize_model_initialization(model, init_context)

@@ -372,7 +372,7 @@ class TestSVDNumericalStability:
 
 
 class TestFactorizedLinearAccuracy:
-    """Test that _factorized_linear produces the same results as standard linear operations."""
+    """Test that OSFTLinear forward produces the same results as standard linear operations."""
 
     @pytest.fixture
     def simple_model_with_osft(self):
@@ -424,85 +424,56 @@ class TestFactorizedLinearAccuracy:
         }
 
     def test_factorized_linear_2d_input(self, simple_model_with_osft):
-        """Test factorized linear with 2D input matches standard linear operation."""
+        """Test OSFTLinear forward with 2D input matches standard linear operation."""
         model = simple_model_with_osft["model"]
         original_weight = simple_model_with_osft["original_weight"]
         original_bias = simple_model_with_osft["original_bias"]
 
-        # Create test input (batch_size=8, input_dim=64)
         test_input = torch.randn(8, 64, dtype=torch.float32)
-
-        # Get expected result using standard linear operation
         expected_output = F.linear(test_input, original_weight, original_bias)
 
-        # Get SVD dict for the linear layer using the proper API
-        linear_module, _ = model._get_module_by_name("linear.weight")
-        svd_dict = model.get_svd_dict_for_module(linear_module)
+        actual_output = model.linear(test_input)
 
-        # Get actual result using factorized linear
-        actual_output = model._factorized_linear(test_input, svd_dict, original_bias)
-
-        # Check shapes match
         assert actual_output.shape == expected_output.shape, (
             f"Shape mismatch: {actual_output.shape} vs {expected_output.shape}"
         )
-
-        # Check outputs are approximately equal (with reasonable tolerance for SVD approximation)
         assert torch.allclose(actual_output, expected_output, rtol=1e-3, atol=1e-4), (
-            f"Factorized linear output differs from standard linear. Max diff: {torch.max(torch.abs(actual_output - expected_output))}"
+            f"OSFTLinear output differs from standard linear. Max diff: {torch.max(torch.abs(actual_output - expected_output))}"
         )
 
     def test_factorized_linear_3d_input(self, simple_model_with_osft):
-        """Test factorized linear with 3D input matches standard linear operation."""
+        """Test OSFTLinear forward with 3D input matches standard linear operation."""
         model = simple_model_with_osft["model"]
         original_weight = simple_model_with_osft["original_weight"]
         original_bias = simple_model_with_osft["original_bias"]
 
-        # Create test input (batch_size=4, seq_len=16, input_dim=64)
         test_input = torch.randn(4, 16, 64, dtype=torch.float32)
-
-        # Get expected result using standard linear operation
         expected_output = F.linear(test_input, original_weight, original_bias)
 
-        # Get SVD dict for the linear layer using the proper API
-        linear_module, _ = model._get_module_by_name("linear.weight")
-        svd_dict = model.get_svd_dict_for_module(linear_module)
+        actual_output = model.linear(test_input)
 
-        # Get actual result using factorized linear
-        actual_output = model._factorized_linear(test_input, svd_dict, original_bias)
-
-        # Check shapes match
         assert actual_output.shape == expected_output.shape, (
             f"Shape mismatch: {actual_output.shape} vs {expected_output.shape}"
         )
-
-        # Check outputs are approximately equal (with reasonable tolerance for SVD approximation)
         assert torch.allclose(actual_output, expected_output, rtol=1e-3, atol=1e-4), (
-            f"Factorized linear output differs from standard linear. Max diff: {torch.max(torch.abs(actual_output - expected_output))}"
+            f"OSFTLinear output differs from standard linear. Max diff: {torch.max(torch.abs(actual_output - expected_output))}"
         )
 
     def test_factorized_linear_without_bias(self, simple_model_with_osft):
-        """Test factorized linear without bias term."""
+        """Test OSFTLinear forward without bias term."""
         model = simple_model_with_osft["model"]
         original_weight = simple_model_with_osft["original_weight"]
 
-        # Create test input
         test_input = torch.randn(6, 64, dtype=torch.float32)
-
-        # Get expected result using standard linear operation (no bias)
         expected_output = F.linear(test_input, original_weight, None)
 
-        # Get SVD dict for the linear layer using the proper API
-        linear_module, _ = model._get_module_by_name("linear.weight")
-        svd_dict = model.get_svd_dict_for_module(linear_module)
+        # OSFTLinear includes bias from original — subtract it for comparison
+        osft_module = model.linear
+        actual_output = osft_module(test_input)
+        if osft_module.bias is not None:
+            actual_output = actual_output - osft_module.bias
 
-        # Get actual result using factorized linear (no bias)
-        actual_output = model._factorized_linear(test_input, svd_dict, None)
-
-        # Check shapes match
         assert actual_output.shape == expected_output.shape
-
-        # Check outputs are approximately equal
         assert torch.allclose(actual_output, expected_output, rtol=1e-3, atol=1e-4), (
-            f"Factorized linear without bias differs from standard linear. Max diff: {torch.max(torch.abs(actual_output - expected_output))}"
+            f"OSFTLinear without bias differs from standard linear. Max diff: {torch.max(torch.abs(actual_output - expected_output))}"
         )

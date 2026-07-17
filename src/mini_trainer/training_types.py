@@ -96,6 +96,15 @@ class TrainingArgs:
     )
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay (L2 penalty) for AdamW optimizer."})
 
+    # Compilation
+    compile_model: bool = field(
+        default=False,
+        metadata={
+            "help": "Compile transformer blocks with torch.compile for improved throughput. "
+            "Not compatible with OSFT or MoE architectures."
+        },
+    )
+
     # Model configuration
     use_liger_kernels: bool = field(default=False, metadata={"help": "Whether to use Liger kernels."})
     osft: bool = field(

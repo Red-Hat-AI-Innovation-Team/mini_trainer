@@ -752,8 +752,6 @@ class TestOSFTModelCreation:
         model = OSFTModelClass(config, osft_config={}, initialize_osft=False)
 
         assert model.osft_config == {}
-        assert hasattr(model, "osft_params")
-        assert len(model.osft_params) == 0
 
 
 class TestSetupModelIntegration:
@@ -1052,6 +1050,75 @@ class TestOSFTPrepareStateDict:
 
         # Verify dtype is preserved
         assert reconstructed["linear.weight"].dtype == torch.float32
+
+
+class TestOSFTReinitialize:
+    """Test reinitialize_osft handles the double-init case correctly."""
+
+    def test_reinitialize_after_initialize(self):
+        """Regression: reinitialize_osft must work when the model was already initialized.
+
+        After the first OSFT init, parameter FQNs change (e.g. q_proj.weight becomes
+        q_proj.osft_U_high). Without restoring dense linears first, the second init
+        finds zero matching targets and silently produces a broken model.
+        """
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config=None, **kwargs):
+                super().__init__()
+                self.linear = nn.Linear(8, 8, bias=False)
+                self.config = config or MagicMock()
+                self.dtype = torch.float32
+
+        OSFTModel = create_osft_model_class(SimpleModel)
+        osft_config = {"linear.weight": 4}
+
+        model = OSFTModel(MagicMock(), osft_config=osft_config, initialize_osft=True)
+        assert len(model.osft_paramspec_registry) == 1
+
+        model.reinitialize_osft(decompose_existing_weights=True)
+        assert len(model.osft_paramspec_registry) == 1, (
+            f"Expected 1 OSFT param after reinit, got {len(model.osft_paramspec_registry)}"
+        )
+
+        from mini_trainer.osft_utils import OSFTLinear
+
+        assert isinstance(model.linear, OSFTLinear)
+
+        x = torch.randn(2, 8)
+        out = model.linear(x)
+        assert out.shape == (2, 8)
+
+        sd = model.state_dict()
+        osft_keys = [k for k in sd if "osft" in k or "_rank_high" in k]
+        assert len(osft_keys) > 0, "No OSFT keys in state dict after reinit"
+
+    def test_reinitialize_preserves_weight_reconstruction(self):
+        """The reconstructed weight after reinit should approximate the original."""
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config=None, **kwargs):
+                super().__init__()
+                self.linear = nn.Linear(16, 16, bias=False)
+                self.config = config or MagicMock()
+                self.dtype = torch.float32
+
+        OSFTModel = create_osft_model_class(SimpleModel)
+        osft_config = {"linear.weight": 12}
+
+        model = OSFTModel(MagicMock(), osft_config=osft_config, initialize_osft=True)
+
+        sd_before = model.prepare_state_dict_for_save(model.state_dict().copy())
+        W_before = sd_before["linear.weight"].clone()
+
+        model.reinitialize_osft(decompose_existing_weights=True)
+
+        sd_after = model.prepare_state_dict_for_save(model.state_dict().copy())
+        W_after = sd_after["linear.weight"]
+
+        assert torch.allclose(W_before, W_after, atol=1e-5), (
+            f"Weight changed after reinit: max diff = {(W_before - W_after).abs().max().item()}"
+        )
 
 
 class TestOSFTOrthogonality:
@@ -2337,10 +2404,10 @@ class TestPostStepParameterProjection:
                 # Add a component in the frozen subspace direction
                 with torch.no_grad():
                     module.osft_params.U_low.data += U_high @ torch.randn(
-                        U_high.shape[1], module.osft_params.U_low.shape[1]
+                        U_high.shape[1], module.osft_params.U_low.shape[1], device=U_high.device
                     )
                     module.osft_params.V_low.data += (
-                        torch.randn(module.osft_params.V_low.shape[0], V_high.shape[0]) @ V_high
+                        torch.randn(module.osft_params.V_low.shape[0], V_high.shape[0], device=V_high.device) @ V_high
                     )
 
         # Now project parameters
@@ -2518,7 +2585,7 @@ class TestPostStepParameterProjection:
             if hasattr(module, "osft_params") and hasattr(module, "osft_U_high"):
                 with torch.no_grad():
                     module.osft_params.U_low.data += module.osft_U_high @ torch.randn(
-                        module.osft_U_high.shape[1], module.osft_params.U_low.shape[1]
+                        module.osft_U_high.shape[1], module.osft_params.U_low.shape[1], device=module.osft_U_high.device
                     )
 
         # First projection
