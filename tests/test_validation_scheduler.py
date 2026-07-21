@@ -1,0 +1,155 @@
+import pytest
+
+from mini_trainer.train import ValidationScheduler
+
+
+class TestValidationSchedulerIsConfigured:
+    def test_no_triggers(self):
+        vs = ValidationScheduler()
+        assert not vs.is_configured
+
+    def test_step_trigger(self):
+        vs = ValidationScheduler(validation_frequency=10)
+        assert vs.is_configured
+
+    def test_epoch_trigger(self):
+        vs = ValidationScheduler(validate_at_epoch=True)
+        assert vs.is_configured
+
+    def test_samples_trigger(self):
+        vs = ValidationScheduler(min_samples_per_validation=100)
+        assert vs.is_configured
+
+    def test_final_trigger(self):
+        vs = ValidationScheduler(validate_at_final=True)
+        assert vs.is_configured
+
+
+class TestStepValidation:
+    def test_validates_at_frequency(self):
+        vs = ValidationScheduler(validation_frequency=5)
+        assert vs.should_validate("step", step=5)
+        assert vs.should_validate("step", step=10)
+        assert vs.should_validate("step", step=15)
+
+    def test_does_not_validate_between_steps(self):
+        vs = ValidationScheduler(validation_frequency=5)
+        assert not vs.should_validate("step", step=1)
+        assert not vs.should_validate("step", step=3)
+        assert not vs.should_validate("step", step=7)
+
+    def test_no_frequency_means_no_step_validation(self):
+        vs = ValidationScheduler()
+        assert not vs.should_validate("step", step=5)
+
+    def test_frequency_zero_means_no_validation(self):
+        vs = ValidationScheduler(validation_frequency=0)
+        assert not vs.should_validate("step", step=0)
+
+
+class TestEpochValidation:
+    def test_validates_at_epoch_boundary(self):
+        vs = ValidationScheduler(validate_at_epoch=True)
+        assert vs.should_validate("epoch", accumulated_samples=100, end_of_epoch=True)
+
+    def test_does_not_validate_mid_epoch(self):
+        vs = ValidationScheduler(validate_at_epoch=True)
+        assert not vs.should_validate("epoch", accumulated_samples=100, end_of_epoch=False)
+
+    def test_disabled_means_no_epoch_validation(self):
+        vs = ValidationScheduler(validate_at_epoch=False)
+        assert not vs.should_validate("epoch", accumulated_samples=100, end_of_epoch=True)
+
+    def test_does_not_double_validate_at_same_samples(self):
+        vs = ValidationScheduler(validate_at_epoch=True)
+        assert vs.should_validate("epoch", accumulated_samples=100, end_of_epoch=True)
+        vs.record_validation("epoch", 100)
+        assert not vs.should_validate("epoch", accumulated_samples=100, end_of_epoch=True)
+
+    def test_validates_again_after_new_samples(self):
+        vs = ValidationScheduler(validate_at_epoch=True)
+        vs.record_validation("epoch", 100)
+        assert vs.should_validate("epoch", accumulated_samples=200, end_of_epoch=True)
+
+
+class TestSamplesValidation:
+    def test_validates_after_enough_samples(self):
+        vs = ValidationScheduler(min_samples_per_validation=100)
+        assert vs.should_validate("samples", accumulated_samples=100)
+
+    def test_does_not_validate_before_threshold(self):
+        vs = ValidationScheduler(min_samples_per_validation=100)
+        assert not vs.should_validate("samples", accumulated_samples=50)
+
+    def test_validates_again_after_recording(self):
+        vs = ValidationScheduler(min_samples_per_validation=100)
+        vs.record_validation("samples", 100)
+        assert not vs.should_validate("samples", accumulated_samples=150)
+        assert vs.should_validate("samples", accumulated_samples=200)
+
+    def test_no_min_samples_means_no_validation(self):
+        vs = ValidationScheduler()
+        assert not vs.should_validate("samples", accumulated_samples=1000)
+
+    def test_records_sample_based_tracker(self):
+        vs = ValidationScheduler(min_samples_per_validation=100)
+        vs.record_validation("samples", 100)
+        assert vs.last_sample_based_validation_samples == 100
+        assert vs.last_validated_samples == 100
+
+
+class TestFinalValidation:
+    def test_validates_at_end_of_training(self):
+        vs = ValidationScheduler(validate_at_final=True)
+        assert vs.should_validate("final", accumulated_samples=100, end_of_training=True)
+
+    def test_does_not_validate_before_end(self):
+        vs = ValidationScheduler(validate_at_final=True)
+        assert not vs.should_validate("final", accumulated_samples=100, end_of_training=False)
+
+    def test_disabled_means_no_final_validation(self):
+        vs = ValidationScheduler(validate_at_final=False)
+        assert not vs.should_validate("final", accumulated_samples=100, end_of_training=True)
+
+    def test_does_not_double_validate(self):
+        vs = ValidationScheduler(validate_at_final=True)
+        vs.record_validation("final", 100)
+        assert not vs.should_validate("final", accumulated_samples=100, end_of_training=True)
+
+
+class TestRecordValidation:
+    def test_record_updates_last_validated_samples(self):
+        vs = ValidationScheduler(validation_frequency=5)
+        vs.record_validation("step", 50)
+        assert vs.last_validated_samples == 50
+
+    def test_record_samples_updates_both_trackers(self):
+        vs = ValidationScheduler(min_samples_per_validation=100)
+        vs.record_validation("samples", 200)
+        assert vs.last_validated_samples == 200
+        assert vs.last_sample_based_validation_samples == 200
+
+    def test_record_non_samples_does_not_update_sample_tracker(self):
+        vs = ValidationScheduler(validation_frequency=5)
+        vs.record_validation("step", 50)
+        assert vs.last_sample_based_validation_samples == 0
+
+
+class TestUnknownValidationType:
+    def test_raises_on_unknown_type(self):
+        vs = ValidationScheduler()
+        with pytest.raises(ValueError, match="Unknown validation type"):
+            vs.should_validate("unknown", step=1)
+
+
+class TestMultipleTriggers:
+    def test_step_and_epoch_both_active(self):
+        vs = ValidationScheduler(validation_frequency=5, validate_at_epoch=True)
+        assert vs.is_configured
+        assert vs.should_validate("step", step=5)
+        assert vs.should_validate("epoch", accumulated_samples=100, end_of_epoch=True)
+
+    def test_triggers_are_independent(self):
+        vs = ValidationScheduler(validation_frequency=5, min_samples_per_validation=100)
+        vs.record_validation("step", 50)
+        assert vs.should_validate("samples", accumulated_samples=100)

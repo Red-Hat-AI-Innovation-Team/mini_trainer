@@ -190,8 +190,22 @@ class TrainingArgs:
     validation_frequency: int | None = field(
         default=None,
         metadata={
-            "help": "The frequency of validation in steps. Required when validation_split > 0 or validation_data_path is provided."
+            "help": "Run validation every N training steps. One of the event-based validation triggers "
+            "(validation_frequency, validate_at_epoch, min_samples_per_validation, validate_at_final) "
+            "must be configured when validation data is provided."
         },
+    )
+    validate_at_epoch: bool = field(
+        default=False,
+        metadata={"help": "Whether to run validation at the end of each epoch."},
+    )
+    min_samples_per_validation: int | None = field(
+        default=None,
+        metadata={"help": "Minimum number of accumulated samples between validation runs."},
+    )
+    validate_at_final: bool = field(
+        default=False,
+        metadata={"help": "Whether to run validation at the end of training."},
     )
 
     # Pretraining configuration (None = instruction tuning, non-None = pretraining)

@@ -35,6 +35,7 @@ from mini_trainer.utils import (
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
+ValidationType = Literal["step", "epoch", "samples", "final"]
 
 app = Typer(
     pretty_exceptions_enable=False,  # disable rich exception formatting
@@ -662,6 +663,84 @@ class Checkpointer:
             log_rank_0(f"New best validation loss: {val_loss:.6f}")
 
 
+class ValidationScheduler:
+    """
+    A stateful scheduler that manages when to run validation, mirroring the
+    Checkpointer's event-based design.
+
+    Supports four trigger types:
+    - step: Validate every N training steps
+    - epoch: Validate at the end of each epoch
+    - samples: Validate every N accumulated samples
+    - final: Validate at the end of training
+    """
+
+    def __init__(
+        self,
+        validation_frequency: int | None = None,
+        validate_at_epoch: bool = False,
+        min_samples_per_validation: int | None = None,
+        validate_at_final: bool = False,
+    ):
+        self.validation_frequency = validation_frequency
+        self.validate_at_epoch = validate_at_epoch
+        self.min_samples_per_validation = min_samples_per_validation
+        self.validate_at_final = validate_at_final
+
+        self.last_validated_samples = 0
+        self.last_sample_based_validation_samples = 0
+
+    @property
+    def is_configured(self) -> bool:
+        return (
+            self.validation_frequency is not None
+            or self.validate_at_epoch
+            or self.min_samples_per_validation is not None
+            or self.validate_at_final
+        )
+
+    def should_validate(
+        self,
+        validation_type: ValidationType,
+        step: int = 0,
+        accumulated_samples: int = 0,
+        end_of_epoch: bool = False,
+        end_of_training: bool = False,
+    ) -> bool:
+        match validation_type:
+            case "step":
+                return (
+                    self.validation_frequency is not None
+                    and self.validation_frequency > 0
+                    and step % self.validation_frequency == 0
+                )
+
+            case "epoch":
+                if not self.validate_at_epoch or not end_of_epoch:
+                    return False
+                return accumulated_samples > self.last_validated_samples
+
+            case "samples":
+                return (
+                    self.min_samples_per_validation is not None
+                    and accumulated_samples
+                    >= self.last_sample_based_validation_samples + self.min_samples_per_validation
+                )
+
+            case "final":
+                if not self.validate_at_final or not end_of_training:
+                    return False
+                return accumulated_samples > self.last_validated_samples
+
+            case _:
+                raise ValueError(f"Unknown validation type: {validation_type}")
+
+    def record_validation(self, validation_type: ValidationType, accumulated_samples: int):
+        self.last_validated_samples = accumulated_samples
+        if validation_type == "samples":
+            self.last_sample_based_validation_samples = accumulated_samples
+
+
 def train(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -683,6 +762,9 @@ def train(
     use_mlflow: bool = False,
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
+    validate_at_epoch: bool = False,
+    min_samples_per_validation: int | None = None,
+    validate_at_final: bool = False,
     trust_remote_code: bool = False,
     on_demand_checkpointing: bool = False,
     resume_from_full_state_checkpoint: str | None = None,
@@ -763,6 +845,13 @@ def train(
         checkpoint_at_final=save_final_checkpoint,
     )
 
+    validation_scheduler = ValidationScheduler(
+        validation_frequency=validation_frequency,
+        validate_at_epoch=validate_at_epoch,
+        min_samples_per_validation=min_samples_per_validation,
+        validate_at_final=validate_at_final,
+    )
+
     # Initialize on-demand full-state checkpointing if enabled
     full_state_checkpointer = None
     if on_demand_checkpointing:
@@ -805,6 +894,12 @@ def train(
         checkpointer.last_saved_samples = cs["last_saved_samples"]
         checkpointer.last_frequency_saved_samples = cs["last_frequency_saved_samples"]
         checkpointer.best_val_loss = cs["best_val_loss"]
+
+        # Restore validation scheduler state
+        vs = meta.get("validation_scheduler_state")
+        if vs:
+            validation_scheduler.last_validated_samples = vs["last_validated_samples"]
+            validation_scheduler.last_sample_based_validation_samples = vs["last_sample_based_validation_samples"]
 
         # Restore LR scheduler
         lr_scheduler.load_state_dict(meta["lr_scheduler_state"])
@@ -984,6 +1079,10 @@ def train(
                         "total_samples_accumulated": total_samples_accumulated,
                         "total_tokens_processed": total_tokens_processed,
                         "last_validation_loss": last_validation_loss,
+                        "validation_scheduler_state": {
+                            "last_validated_samples": validation_scheduler.last_validated_samples,
+                            "last_sample_based_validation_samples": validation_scheduler.last_sample_based_validation_samples,
+                        },
                     },
                     checkpointer_state={
                         "last_saved_samples": checkpointer.last_saved_samples,
@@ -1055,13 +1154,30 @@ def train(
                 "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
                 "val_loss": last_validation_loss,
             }
-            # Add validation metrics if it's time to validate
-            if val_data_loader is not None and validation_frequency is not None and step % validation_frequency == 0:
+            # Event-based validation: step trigger
+            if val_data_loader is not None and validation_scheduler.should_validate(
+                "step", step=step, accumulated_samples=total_samples_accumulated
+            ):
                 val_metrics = compute_validation_loss(model, val_data_loader, device)
                 if val_metrics and "val_loss" in val_metrics:
                     last_validation_loss = val_metrics["val_loss"]
                     print(f"Validation loss: {last_validation_loss}")
                 batch_metrics.update(val_metrics)
+                validation_scheduler.record_validation("step", total_samples_accumulated)
+
+                if callback_manager:
+                    callback_manager.fire("on_evaluate", val_metrics=val_metrics)
+
+            # Event-based validation: sample trigger
+            if val_data_loader is not None and validation_scheduler.should_validate(
+                "samples", accumulated_samples=total_samples_accumulated
+            ):
+                val_metrics = compute_validation_loss(model, val_data_loader, device)
+                if val_metrics and "val_loss" in val_metrics:
+                    last_validation_loss = val_metrics["val_loss"]
+                    print(f"Validation loss: {last_validation_loss}")
+                batch_metrics.update(val_metrics)
+                validation_scheduler.record_validation("samples", total_samples_accumulated)
 
                 if callback_manager:
                     callback_manager.fire("on_evaluate", val_metrics=val_metrics)
@@ -1090,6 +1206,10 @@ def train(
                         "total_samples_accumulated": total_samples_accumulated,
                         "total_tokens_processed": total_tokens_processed,
                         "last_validation_loss": last_validation_loss,
+                        "validation_scheduler_state": {
+                            "last_validated_samples": validation_scheduler.last_validated_samples,
+                            "last_sample_based_validation_samples": validation_scheduler.last_sample_based_validation_samples,
+                        },
                     },
                     checkpointer_state={
                         "last_saved_samples": checkpointer.last_saved_samples,
@@ -1166,6 +1286,40 @@ def train(
         if callback_manager:
             callback_manager.context.epoch = epoch
 
+        # Event-based validation: epoch trigger
+        if val_data_loader is not None and validation_scheduler.should_validate(
+            "epoch", accumulated_samples=total_samples_accumulated, end_of_epoch=True
+        ):
+            val_metrics = compute_validation_loss(model, val_data_loader, device)
+            if val_metrics and "val_loss" in val_metrics:
+                last_validation_loss = val_metrics["val_loss"]
+                log_rank_0(f"Epoch {epoch} validation loss: {last_validation_loss}")
+            validation_scheduler.record_validation("epoch", total_samples_accumulated)
+
+            if callback_manager:
+                callback_manager.fire("on_evaluate", val_metrics=val_metrics)
+
+            if checkpointer.should_save_checkpoint(
+                save_type="best_val_loss",
+                accumulated_samples=total_samples_accumulated,
+                val_loss=last_validation_loss,
+            ):
+                save_model(
+                    model,
+                    total_samples_accumulated,
+                    output_dir,
+                    model_name_or_path,
+                    suffix="best_val_loss",
+                    trust_remote_code=trust_remote_code,
+                )
+                checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
+
+                if callback_manager:
+                    _ckpt = str(
+                        Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_best_val_loss"
+                    )
+                    callback_manager.fire("on_save", checkpoint_path=_ckpt)
+
         # save at the current number of samples seen
         # should save at the end of each epoch
         if checkpointer.should_save_checkpoint(
@@ -1190,6 +1344,39 @@ def train(
             callback_manager.fire("on_epoch_end")
 
     torch.distributed.barrier()
+
+    # Event-based validation: final trigger
+    if val_data_loader is not None and validation_scheduler.should_validate(
+        "final", accumulated_samples=total_samples_accumulated, end_of_training=True
+    ):
+        val_metrics = compute_validation_loss(model, val_data_loader, device)
+        if val_metrics and "val_loss" in val_metrics:
+            last_validation_loss = val_metrics["val_loss"]
+            log_rank_0(f"Final validation loss: {last_validation_loss}")
+        validation_scheduler.record_validation("final", total_samples_accumulated)
+
+        if callback_manager:
+            callback_manager.fire("on_evaluate", val_metrics=val_metrics)
+
+        if checkpointer.should_save_checkpoint(
+            save_type="best_val_loss",
+            accumulated_samples=total_samples_accumulated,
+            val_loss=last_validation_loss,
+        ):
+            save_model(
+                model,
+                total_samples_accumulated,
+                output_dir,
+                model_name_or_path,
+                suffix="best_val_loss",
+                trust_remote_code=trust_remote_code,
+            )
+            checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
+
+            if callback_manager:
+                _ckpt = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_best_val_loss")
+                callback_manager.fire("on_save", checkpoint_path=_ckpt)
+
     # save one last time if we haven't yet
     if checkpointer.should_save_checkpoint(
         save_type="final",
@@ -1344,9 +1531,19 @@ def main(
     validation_frequency: Annotated[
         int | None,
         Option(
-            help="Frequency of validation evaluation (in steps). Required when validation_split > 0 or validation_data_path is provided"
+            help="Run validation every N training steps. At least one validation trigger must be set when validation data is provided"
         ),
     ] = None,
+    validate_at_epoch: Annotated[
+        bool, Option(help="Whether to run validation at the end of each epoch")
+    ] = False,
+    min_samples_per_validation: Annotated[
+        int | None,
+        Option(help="Minimum number of accumulated samples between validation runs"),
+    ] = None,
+    validate_at_final: Annotated[
+        bool, Option(help="Whether to run validation at the end of training")
+    ] = False,
     # checkpoint parameters
     save_best_val_loss: Annotated[
         bool, Option(help="Whether to save checkpoints when validation loss improves")
@@ -1428,8 +1625,17 @@ def main(
         raise ValueError("validation_data_path and validation_split are mutually exclusive")
 
     has_validation = validation_split > 0.0 or validation_data_path is not None
-    if has_validation and (validation_frequency is None or validation_frequency <= 0):
-        raise ValueError("validation_frequency must be provided and positive when using validation")
+    has_validation_trigger = (
+        (validation_frequency is not None and validation_frequency > 0)
+        or validate_at_epoch
+        or min_samples_per_validation is not None
+        or validate_at_final
+    )
+    if has_validation and not has_validation_trigger:
+        raise ValueError(
+            "At least one validation trigger must be configured when validation data is provided: "
+            "validation_frequency, validate_at_epoch, min_samples_per_validation, or validate_at_final"
+        )
 
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
@@ -1473,6 +1679,9 @@ def main(
             "validation_split": validation_split,
             "validation_data_path": validation_data_path,
             "validation_frequency": validation_frequency,
+            "validate_at_epoch": validate_at_epoch,
+            "min_samples_per_validation": min_samples_per_validation,
+            "validate_at_final": validate_at_final,
             "save_best_val_loss": save_best_val_loss,
             "val_loss_improvement_threshold": val_loss_improvement_threshold,
             "wandb_project": wandb_project,
@@ -1661,6 +1870,9 @@ def main(
         use_mlflow=use_mlflow,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
+        validate_at_epoch=validate_at_epoch,
+        min_samples_per_validation=min_samples_per_validation,
+        validate_at_final=validate_at_final,
         trust_remote_code=trust_remote_code,
         on_demand_checkpointing=on_demand_checkpointing,
         resume_from_full_state_checkpoint=resume_from_full_state_checkpoint,

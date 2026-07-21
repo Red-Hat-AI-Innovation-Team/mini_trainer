@@ -158,6 +158,12 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if has_validation:
         if train_args.validation_frequency is not None:
             command.append(f"--validation-frequency={train_args.validation_frequency}")
+        if train_args.validate_at_epoch:
+            command.append("--validate-at-epoch")
+        if train_args.min_samples_per_validation is not None:
+            command.append(f"--min-samples-per-validation={train_args.min_samples_per_validation}")
+        if train_args.validate_at_final:
+            command.append("--validate-at-final")
 
         if train_args.save_best_val_loss:
             command.append("--save-best-val-loss")
