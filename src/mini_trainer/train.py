@@ -1315,9 +1315,7 @@ def train(
                 checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
 
                 if callback_manager:
-                    _ckpt = str(
-                        Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_best_val_loss"
-                    )
+                    _ckpt = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_best_val_loss")
                     callback_manager.fire("on_save", checkpoint_path=_ckpt)
 
         # save at the current number of samples seen
@@ -1534,16 +1532,12 @@ def main(
             help="Run validation every N training steps. At least one validation trigger must be set when validation data is provided"
         ),
     ] = None,
-    validate_at_epoch: Annotated[
-        bool, Option(help="Whether to run validation at the end of each epoch")
-    ] = False,
+    validate_at_epoch: Annotated[bool, Option(help="Whether to run validation at the end of each epoch")] = False,
     min_samples_per_validation: Annotated[
         int | None,
         Option(help="Minimum number of accumulated samples between validation runs"),
     ] = None,
-    validate_at_final: Annotated[
-        bool, Option(help="Whether to run validation at the end of training")
-    ] = False,
+    validate_at_final: Annotated[bool, Option(help="Whether to run validation at the end of training")] = False,
     # checkpoint parameters
     save_best_val_loss: Annotated[
         bool, Option(help="Whether to save checkpoints when validation loss improves")
