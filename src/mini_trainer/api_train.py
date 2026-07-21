@@ -156,6 +156,21 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
     has_validation = train_args.validation_split > 0.0 or train_args.validation_data_path is not None
     if has_validation:
+        has_trigger = (
+            (train_args.validation_frequency is not None and train_args.validation_frequency > 0)
+            or train_args.validate_at_epoch
+            or (train_args.min_samples_per_validation is not None and train_args.min_samples_per_validation > 0)
+            or train_args.validate_at_final
+        )
+        if not has_trigger:
+            raise ValueError(
+                "Validation data is provided but no validation trigger is configured. "
+                "Set at least one of: validation_frequency, validate_at_epoch, "
+                "min_samples_per_validation, or validate_at_final."
+            )
+        if train_args.min_samples_per_validation is not None and train_args.min_samples_per_validation < 1:
+            raise ValueError("min_samples_per_validation must be a positive integer when set")
+
         if train_args.validation_frequency is not None:
             command.append(f"--validation-frequency={train_args.validation_frequency}")
         if train_args.validate_at_epoch:
