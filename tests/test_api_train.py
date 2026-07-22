@@ -619,7 +619,7 @@ class TestRunTraining:
                 run_training(torch_args, train_args)
 
     def test_run_training_min_samples_per_validation_zero_raises(self):
-        """Test that min_samples_per_validation=0 raises ValueError when another trigger is set."""
+        """Test that min_samples_per_validation=0 raises ValueError even as sole trigger."""
         with tempfile.TemporaryDirectory() as tmpdir:
             torch_args = TorchrunArgs(nproc_per_node=1)
             train_args = TrainingArgs(
@@ -630,7 +630,6 @@ class TestRunTraining:
                 learning_rate=1e-5,
                 output_dir=tmpdir,
                 validation_split=0.1,
-                validate_at_epoch=True,
                 min_samples_per_validation=0,
             )
 
@@ -638,7 +637,7 @@ class TestRunTraining:
                 run_training(torch_args, train_args)
 
     def test_run_training_min_samples_per_validation_negative_raises(self):
-        """Test that negative min_samples_per_validation raises ValueError."""
+        """Test that negative min_samples_per_validation raises ValueError even as sole trigger."""
         with tempfile.TemporaryDirectory() as tmpdir:
             torch_args = TorchrunArgs(nproc_per_node=1)
             train_args = TrainingArgs(
@@ -649,7 +648,6 @@ class TestRunTraining:
                 learning_rate=1e-5,
                 output_dir=tmpdir,
                 validation_data_path="/data/eval.jsonl",
-                validate_at_final=True,
                 min_samples_per_validation=-5,
             )
 

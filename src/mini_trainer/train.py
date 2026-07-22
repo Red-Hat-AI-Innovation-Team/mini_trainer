@@ -1639,10 +1639,12 @@ def main(
         raise ValueError("validation_data_path and validation_split are mutually exclusive")
 
     has_validation = validation_split > 0.0 or validation_data_path is not None
+    if has_validation and min_samples_per_validation is not None and min_samples_per_validation < 1:
+        raise ValueError("min_samples_per_validation must be a positive integer when set")
     has_validation_trigger = (
         (validation_frequency is not None and validation_frequency > 0)
         or validate_at_epoch
-        or min_samples_per_validation is not None
+        or (min_samples_per_validation is not None and min_samples_per_validation > 0)
         or validate_at_final
     )
     if has_validation and not has_validation_trigger:
