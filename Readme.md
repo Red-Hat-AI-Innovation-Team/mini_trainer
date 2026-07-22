@@ -125,10 +125,11 @@ torchrun --nnodes=1 --nproc-per-node=8 -m mini_trainer.train \
 - `--osft` - Enable Orthogonal Subspace Fine-Tuning mode
 - `--osft-unfreeze-rank-ratio` - Ratio of model parameters to train with OSFT (0.0-1.0)
 - `--block-size` - Enables pretraining mode with the given block length
-- `--validation-split` - Fraction of training data to hold out for validation (0.0-1.0)
+- `--validation-split` - Fraction of training data to hold out for validation (greater than 0, less than 1)
 - `--validation-data-path` - Path to a separate validation dataset (mutually exclusive with `--validation-split`)
 - `--validation-frequency` - Run validation every N steps
 - `--validate-at-epoch` - Run validation at the end of each epoch
+- `--min-samples-per-validation` - Minimum accumulated samples between validation runs
 - `--validate-at-final` - Run validation at the end of training
 
 For the complete list of arguments and advanced configuration options, see [`src/mini_trainer/api_train.py`](src/mini_trainer/api_train.py).
