@@ -28,6 +28,7 @@
 - ♾️ **Infinite Sampling** - Continuous data streaming without manual epoch configuration
 - 🔬 **Orthogonal Subspace Fine-Tuning (OSFT)** - Advanced continual learning technique for parameter-efficient training
 - 📚 **Pretraining Mode** - Document-style pretraining with configurable block sizes on pre-tokenized `input_ids`
+- ✅ **Event-Based Validation** - Configurable validation triggers (step, epoch, sample-count, end-of-training) with best-loss checkpointing
 - 📊 **Flexible Logging** - JSONL metrics logging with optional Weights & Biases integration
 
 ---
@@ -124,6 +125,11 @@ torchrun --nnodes=1 --nproc-per-node=8 -m mini_trainer.train \
 - `--osft` - Enable Orthogonal Subspace Fine-Tuning mode
 - `--osft-unfreeze-rank-ratio` - Ratio of model parameters to train with OSFT (0.0-1.0)
 - `--block-size` - Enables pretraining mode with the given block length
+- `--validation-split` - Fraction of training data to hold out for validation (0.0-1.0)
+- `--validation-data-path` - Path to a separate validation dataset (mutually exclusive with `--validation-split`)
+- `--validation-frequency` - Run validation every N steps
+- `--validate-at-epoch` - Run validation at the end of each epoch
+- `--validate-at-final` - Run validation at the end of training
 
 For the complete list of arguments and advanced configuration options, see [`src/mini_trainer/api_train.py`](src/mini_trainer/api_train.py).
 
@@ -131,6 +137,90 @@ For the complete list of arguments and advanced configuration options, see [`src
 
 > 🛠️ **Contributors** – Looking for the lazy-init + FSDP2 loading flow?  
 > See [docs/distributed_initialization.md](docs/distributed_initialization.md) for diagrams and a detailed walkthrough of the SFT and OSFT pipelines.
+
+## ✅ Validation
+
+Mini Trainer supports configurable validation during training with an event-based trigger system. You can combine multiple triggers to control exactly when validation runs.
+
+### Providing Validation Data
+
+There are two ways to supply validation data:
+
+1. **Automatic split** — hold out a fraction of the training data:
+   ```bash
+   --validation-split 0.1  # use 10% for validation
+   ```
+
+2. **Separate dataset** — provide a dedicated JSONL file:
+   ```bash
+   --validation-data-path ./eval_data.jsonl
+   ```
+
+These options are mutually exclusive.
+
+### Validation Triggers
+
+At least one trigger must be configured when validation data is provided. Triggers can be combined — for example, validate every 100 steps *and* at the end of each epoch.
+
+| Flag | Description |
+|------|-------------|
+| `--validation-frequency N` | Run validation every **N** training steps |
+| `--validate-at-epoch` | Run validation at the **end of each epoch** |
+| `--min-samples-per-validation N` | Run validation every **N** accumulated samples |
+| `--validate-at-final` | Run validation at the **end of training** |
+
+When both step and sample triggers fire on the same step, validation runs only once (triggers are coalesced).
+
+### Best Validation Loss Checkpointing
+
+Save a checkpoint whenever validation loss improves:
+
+```bash
+--save-best-val-loss \
+--val-loss-improvement-threshold 0.001  # optional minimum improvement
+```
+
+### CLI Example
+
+```bash
+torchrun --nnodes=1 --nproc-per-node=8 -m mini_trainer.train \
+    --model-name-or-path meta-llama/Llama-3.1-8B-Instruct \
+    --data-path ./data.jsonl \
+    --output-dir ./checkpoints \
+    --batch-size 128 \
+    --max-tokens-per-gpu 128000 \
+    --learning-rate 5e-6 \
+    --validation-data-path ./eval_data.jsonl \
+    --validate-at-epoch \
+    --validate-at-final \
+    --save-best-val-loss
+```
+
+### Programmatic API
+
+```python
+from mini_trainer import TrainingArgs, TorchrunArgs, run_training
+
+train_args = TrainingArgs(
+    model_name_or_path="meta-llama/Llama-3.1-8B-Instruct",
+    data_path="./data.jsonl",
+    output_dir="./checkpoints",
+    batch_size=128,
+    max_tokens_per_gpu=128000,
+    learning_rate=5e-6,
+    # Validation configuration
+    validation_data_path="./eval_data.jsonl",
+    validate_at_epoch=True,
+    validate_at_final=True,
+    save_best_val_loss=True,
+)
+
+run_training(TorchrunArgs(nproc_per_node=8), train_args)
+```
+
+Validation state is saved in full-state checkpoints, so training can be resumed without re-running validation from scratch.
+
+---
 
 ## 📊 Data Format
 
