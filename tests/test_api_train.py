@@ -584,6 +584,153 @@ class TestRunTraining:
             assert "--validate-at-final" in command
             assert "--validation-split=0.1" in command
 
+    def test_run_training_validation_data_without_trigger_raises(self):
+        """Test that validation data without any trigger raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_data_path="/data/eval.jsonl",
+            )
+
+            with pytest.raises(ValueError, match="no validation trigger is configured"):
+                run_training(torch_args, train_args)
+
+    def test_run_training_validation_split_without_trigger_raises(self):
+        """Test that validation split without any trigger raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_split=0.1,
+            )
+
+            with pytest.raises(ValueError, match="no validation trigger is configured"):
+                run_training(torch_args, train_args)
+
+    def test_run_training_min_samples_per_validation_zero_raises(self):
+        """Test that min_samples_per_validation=0 raises ValueError when another trigger is set."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_split=0.1,
+                validate_at_epoch=True,
+                min_samples_per_validation=0,
+            )
+
+            with pytest.raises(ValueError, match="positive integer"):
+                run_training(torch_args, train_args)
+
+    def test_run_training_min_samples_per_validation_negative_raises(self):
+        """Test that negative min_samples_per_validation raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_data_path="/data/eval.jsonl",
+                validate_at_final=True,
+                min_samples_per_validation=-5,
+            )
+
+            with pytest.raises(ValueError, match="positive integer"):
+                run_training(torch_args, train_args)
+
+    @patch("mini_trainer.api_train.StreamablePopen")
+    def test_run_training_validation_data_path_with_epoch_trigger(self, mock_popen_class):
+        """Test validation_data_path with epoch trigger passes validation."""
+        mock_popen = MagicMock()
+        mock_popen.poll.return_value = 0
+        mock_popen_class.return_value = mock_popen
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_data_path="/data/eval.jsonl",
+                validate_at_epoch=True,
+            )
+
+            run_training(torch_args, train_args)
+
+            call_args = mock_popen_class.call_args
+            _, command = call_args[0]
+            assert "--validation-data-path=/data/eval.jsonl" in command
+            assert "--validate-at-epoch" in command
+
+    @patch("mini_trainer.api_train.StreamablePopen")
+    def test_run_training_validation_data_path_with_final_trigger(self, mock_popen_class):
+        """Test validation_data_path with final trigger passes validation."""
+        mock_popen = MagicMock()
+        mock_popen.poll.return_value = 0
+        mock_popen_class.return_value = mock_popen
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+                validation_data_path="/data/eval.jsonl",
+                validate_at_final=True,
+            )
+
+            run_training(torch_args, train_args)
+
+            call_args = mock_popen_class.call_args
+            _, command = call_args[0]
+            assert "--validation-data-path=/data/eval.jsonl" in command
+            assert "--validate-at-final" in command
+
+    @patch("mini_trainer.api_train.StreamablePopen")
+    def test_run_training_no_validation_data_skips_trigger_check(self, mock_popen_class):
+        """Test that no validation data means no trigger check."""
+        mock_popen = MagicMock()
+        mock_popen.poll.return_value = 0
+        mock_popen_class.return_value = mock_popen
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            torch_args = TorchrunArgs(nproc_per_node=1)
+            train_args = TrainingArgs(
+                model_name_or_path="test-model",
+                data_path="train.jsonl",
+                batch_size=32,
+                max_tokens_per_gpu=1000,
+                learning_rate=1e-5,
+                output_dir=tmpdir,
+            )
+
+            run_training(torch_args, train_args)
+            assert mock_popen_class.called
+
     @patch("mini_trainer.api_train.StreamablePopen")
     def test_run_training_keyboard_interrupt(self, mock_popen_class):
         """Test that run_training handles keyboard interrupt properly."""

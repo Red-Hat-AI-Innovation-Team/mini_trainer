@@ -203,3 +203,117 @@ class TestBoundsValidation:
         vs = ValidationScheduler(validation_frequency=-1)
         assert vs.validation_frequency is None
         assert not vs.is_configured
+
+
+class TestStateSerializationAndRestore:
+    def test_state_roundtrip(self):
+        vs = ValidationScheduler(
+            validation_frequency=5,
+            validate_at_epoch=True,
+            min_samples_per_validation=100,
+            validate_at_final=True,
+        )
+        vs.record_validation("step", 50)
+        vs.record_validation("samples", 200)
+        vs.record_validation("epoch", 300)
+        vs.record_validation("final", 400)
+
+        state = {
+            "last_validated_samples": vs.last_validated_samples,
+            "last_sample_based_validation_samples": vs.last_sample_based_validation_samples,
+            "last_epoch_validated_samples": vs.last_epoch_validated_samples,
+            "last_final_validated_samples": vs.last_final_validated_samples,
+        }
+
+        vs2 = ValidationScheduler(
+            validation_frequency=5,
+            validate_at_epoch=True,
+            min_samples_per_validation=100,
+            validate_at_final=True,
+        )
+        vs2.last_validated_samples = state["last_validated_samples"]
+        vs2.last_sample_based_validation_samples = state["last_sample_based_validation_samples"]
+        vs2.last_epoch_validated_samples = state["last_epoch_validated_samples"]
+        vs2.last_final_validated_samples = state["last_final_validated_samples"]
+
+        assert vs2.last_validated_samples == 400
+        assert vs2.last_sample_based_validation_samples == 200
+        assert vs2.last_epoch_validated_samples == 300
+        assert vs2.last_final_validated_samples == 400
+
+        assert not vs2.should_validate("samples", accumulated_samples=250)
+        assert vs2.should_validate("samples", accumulated_samples=300)
+        assert not vs2.should_validate("epoch", accumulated_samples=300, end_of_epoch=True)
+        assert vs2.should_validate("epoch", accumulated_samples=301, end_of_epoch=True)
+
+    def test_restore_with_defaults_for_missing_keys(self):
+        state = {
+            "last_validated_samples": 100,
+            "last_sample_based_validation_samples": 100,
+        }
+
+        vs = ValidationScheduler(validate_at_epoch=True, validate_at_final=True)
+        vs.last_validated_samples = state["last_validated_samples"]
+        vs.last_sample_based_validation_samples = state["last_sample_based_validation_samples"]
+        vs.last_epoch_validated_samples = state.get("last_epoch_validated_samples", 0)
+        vs.last_final_validated_samples = state.get("last_final_validated_samples", 0)
+
+        assert vs.last_epoch_validated_samples == 0
+        assert vs.last_final_validated_samples == 0
+        assert vs.should_validate("epoch", accumulated_samples=1, end_of_epoch=True)
+        assert vs.should_validate("final", accumulated_samples=1, end_of_training=True)
+
+
+class TestCoalescedValidation:
+    def test_step_and_sample_coalesce(self):
+        vs = ValidationScheduler(validation_frequency=5, min_samples_per_validation=100)
+        step_fires = vs.should_validate("step", step=5, accumulated_samples=100)
+        sample_fires = vs.should_validate("samples", accumulated_samples=100)
+        assert step_fires
+        assert sample_fires
+        vs.record_validation("step", 100)
+        vs.record_validation("samples", 100)
+        assert vs.last_validated_samples == 100
+        assert vs.last_sample_based_validation_samples == 100
+
+    def test_step_fires_sample_does_not(self):
+        vs = ValidationScheduler(validation_frequency=5, min_samples_per_validation=200)
+        assert vs.should_validate("step", step=5, accumulated_samples=50)
+        assert not vs.should_validate("samples", accumulated_samples=50)
+
+    def test_sample_fires_step_does_not(self):
+        vs = ValidationScheduler(validation_frequency=5, min_samples_per_validation=100)
+        assert not vs.should_validate("step", step=3, accumulated_samples=100)
+        assert vs.should_validate("samples", accumulated_samples=100)
+
+    def test_neither_fires(self):
+        vs = ValidationScheduler(validation_frequency=5, min_samples_per_validation=200)
+        assert not vs.should_validate("step", step=3, accumulated_samples=50)
+        assert not vs.should_validate("samples", accumulated_samples=50)
+
+
+class TestValidationSchedulerInitialization:
+    def test_initial_state_is_zero(self):
+        vs = ValidationScheduler(
+            validation_frequency=5,
+            validate_at_epoch=True,
+            min_samples_per_validation=100,
+            validate_at_final=True,
+        )
+        assert vs.last_validated_samples == 0
+        assert vs.last_sample_based_validation_samples == 0
+        assert vs.last_epoch_validated_samples == 0
+        assert vs.last_final_validated_samples == 0
+
+    def test_all_triggers_configured(self):
+        vs = ValidationScheduler(
+            validation_frequency=10,
+            validate_at_epoch=True,
+            min_samples_per_validation=500,
+            validate_at_final=True,
+        )
+        assert vs.is_configured
+        assert vs.validation_frequency == 10
+        assert vs.validate_at_epoch is True
+        assert vs.min_samples_per_validation == 500
+        assert vs.validate_at_final is True
