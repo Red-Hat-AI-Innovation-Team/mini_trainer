@@ -455,6 +455,12 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
     #     f"num_loss_counted_tokens: {num_loss_counted_tokens}\033[0m"
     # )
 
+    pad_len = (8 - total_len % 8) % 8
+    if pad_len > 0:
+        input_ids.extend([0] * pad_len)
+        labels.extend([-100] * pad_len)
+        position_ids.extend(range(pad_len))
+
     return {
         "input_ids": torch.tensor([input_ids], dtype=torch.long),
         "labels": torch.tensor([labels], dtype=torch.long),
@@ -503,6 +509,7 @@ def padded_mb_collate_fn(minibatch: list[dict], batch_num_loss_counted_tokens: i
         }
 
     max_len = max(len(item["input_ids"]) for item in minibatch)
+    max_len = (max_len + 7) & ~7  # round up to multiple of 8 for torch.compile
 
     padded_input_ids = []
     padded_labels = []
