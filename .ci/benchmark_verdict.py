@@ -63,8 +63,8 @@ def render(res, v):
     lines = [MARKER,
              f"## MiniCloud benchmark — PR #{res['pr']} ({res['mode']}){speed}", "",
              f"baseline `{res['shas']['main']}` (main) vs PR head `{res['shas']['pr']}` — "
-             f"{res['gpus']}×GPU on the isolated CI node, {res['model']}, {res['steps']} steps, "
-             f"synthetic 100×512, TESTING=true (SDPA)", "",
+             f"{res['gpus']}×GPU on the isolated CI node, torch {res.get('torch', '?')}, {res['model']}, "
+             f"{res['steps']} steps, synthetic 100×512, TESTING=true (SDPA)", "",
              "| config | run | median step (s) | tokens/s | peak mem GB |", "|---|---|---|---|---|"]
     lines += [_row(res, n, med) for n in CONFIGS]
     lines += ["",

@@ -2,8 +2,9 @@
 # The torch.compile benchmark, run by .github/workflows/benchmark.yml
 # inside a MiniCloud job: a throwaway copy of the CI account's `ci-base`
 # workspace with this checkout (main) at ~/bench/main-src and a venv at
-# ~/venvs/mini_trainer that already holds torch, the [cuda] extras and the
-# C toolchain inductor needs. Three configs, one after another:
+# ~/venvs/bench that holds the LATEST torch (no flash-attn: every config
+# runs SDPA) and the C toolchain inductor needs. Three configs, one after
+# another:
 #
 #   baseline     main, eager
 #   pr-eager     the pull request's head, eager
@@ -46,9 +47,10 @@ git -C "$PR" fetch -q "https://github.com/$CI_REPO" "pull/$BENCH_PR/head:prhead"
 git -C "$PR" checkout -q prhead
 echo "main $(git -C "$MAIN" rev-parse --short HEAD)  pr $(git -C "$PR" rev-parse --short HEAD)"
 
-source ~/venvs/mini_trainer/bin/activate
+source ~/venvs/bench/bin/activate
 export TESTING=true                       # SDPA: the same attention for all three
 export TORCHINDUCTOR_CACHE_DIR=$WORK/inductor-cache
+TORCH=$(python -c "import torch; print(torch.__version__)")
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count())"
 
 echo "== data: 100 x 512 random tokens from the model's vocab"
@@ -100,11 +102,11 @@ run_cfg pr-eager    "$PR"
 run_cfg pr-compiled "$PR" --compile-model
 
 echo "== results"
-MAIN_SRC="$MAIN" python - "$WORK" "$OUT" "$MODE" "$MODEL" "$STEPS" "$GPUS" "$BENCH_PR" <<'PY'
+MAIN_SRC="$MAIN" python - "$WORK" "$OUT" "$MODE" "$MODEL" "$STEPS" "$GPUS" "$BENCH_PR" "$TORCH" <<'PY'
 import json, os, subprocess, sys
-work, out, mode, model, steps, gpus, pr = sys.argv[1:8]
+work, out, mode, model, steps, gpus, pr, torch_version = sys.argv[1:9]
 sha = lambda d: subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-res = {"pr": int(pr), "mode": mode, "model": model, "steps": int(steps), "gpus": int(gpus),
+res = {"pr": int(pr), "mode": mode, "model": model, "steps": int(steps), "gpus": int(gpus), "torch": torch_version,
        "shas": {"main": sha(os.environ["MAIN_SRC"]), "pr": sha(f"{work}/pr-src")}}
 for name in ("baseline", "pr-eager", "pr-compiled"):
     rc = int(open(f"{work}/rc-{name}").read().strip())
