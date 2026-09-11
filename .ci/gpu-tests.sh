@@ -15,3 +15,5 @@ python -c "import torch, flash_attn; print('torch', torch.__version__, 'cuda', t
 
 export TESTING=true
 pytest tests/gpu_tests -v --tb=short -p no:xdist
+
+# probe: does a pull_request_target run report the required gpu-tests check on a PR (2026-09-11)
