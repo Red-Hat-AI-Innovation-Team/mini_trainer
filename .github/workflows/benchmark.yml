@@ -1,0 +1,132 @@
+# The torch.compile benchmark on MiniCloud's CI node: baseline (main,
+# eager) vs the PR's head eager vs the PR's head with --compile-model,
+# with the four verdicts of the compile benchmark spec posted on the PR.
+#
+# Runs when a maintainer adds the `benchmark` label (sft) or
+# `benchmark-osft` (osft) to a pull request, and again on every push
+# while the label stays; or from the Actions tab with a PR number and the
+# model, steps and GPU count for a bigger run. Not on every PR: it is a
+# ten-minute GPU run that only compile-style changes need.
+#
+# The runner never checks out the PR: the job clones main inside its
+# copy and runs main's .ci/benchmark.sh, which fetches the PR's head as
+# the code under test. So a PR cannot change the ruler it is measured
+# with. The runner needs the secret MINIC_TOKEN and the variable
+# MINIC_URL, and writes one comment per PR, updated in place.
+name: benchmark
+
+on:
+  pull_request_target:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number"
+        required: true
+      mode:
+        description: "sft or osft"
+        default: sft
+      model:
+        description: "Model id"
+        default: Qwen/Qwen2.5-0.5B-Instruct
+      steps:
+        description: "Training steps per config (steps 1-3 warm up)"
+        default: "20"
+      gpus:
+        description: "GPUs (torchrun processes): 1, 2, 4 or 8"
+        default: "1"
+
+concurrency:
+  group: benchmark-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  benchmark:
+    name: benchmark
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark') ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark-osft')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      pull-requests: write
+    env:
+      MINIC_URL: ${{ vars.MINIC_URL }}
+      MINIC_TOKEN: ${{ secrets.MINIC_TOKEN }}
+      MINIC_POLL_MS: "10000"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Settings
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            PR="${{ inputs.pr }}"; MODE="${{ inputs.mode }}"; MODEL="${{ inputs.model }}"
+            STEPS="${{ inputs.steps }}"; GPUS="${{ inputs.gpus }}"
+          else
+            PR="${{ github.event.pull_request.number }}"
+            MODE=sft
+            if [ "${{ contains(github.event.pull_request.labels.*.name, 'benchmark-osft') }}" = true ]; then MODE=osft; fi
+            MODEL=Qwen/Qwen2.5-0.5B-Instruct; STEPS=20; GPUS=1
+          fi
+          case "$MODE" in sft|osft) ;; *) echo "::error::mode must be sft or osft"; exit 1;; esac
+          case "$GPUS" in 1|2|4|8) ;; *) echo "::error::gpus must be 1, 2, 4 or 8"; exit 1;; esac
+          for k in pr mode model steps gpus; do eval "v=\$${k^^}"; echo "$k=$v" >> "$GITHUB_OUTPUT"; done
+          echo "PR #$PR mode=$MODE model=$MODEL steps=$STEPS gpus=$GPUS"
+
+      - name: Install minic
+        run: curl -fsSL "$MINIC_URL/cli/download/linux/amd64" -o minic && chmod +x minic && ./minic version
+
+      - name: Submit the job
+        id: submit
+        env:
+          CI_REPO: ${{ github.repository }}
+          BENCH_PR: ${{ steps.cfg.outputs.pr }}
+          BENCH_MODE: ${{ steps.cfg.outputs.mode }}
+          BENCH_MODEL: ${{ steps.cfg.outputs.model }}
+          BENCH_STEPS: ${{ steps.cfg.outputs.steps }}
+          BENCH_GPUS: ${{ steps.cfg.outputs.gpus }}
+        run: |
+          NAME=$(./minic job submit ci-base --gpus "$BENCH_GPUS" --max-hours 2.5 --json \
+                   -e CI_REPO="$CI_REPO" -e BENCH_PR="$BENCH_PR" -e BENCH_MODE="$BENCH_MODE" \
+                   -e BENCH_MODEL="$BENCH_MODEL" -e BENCH_STEPS="$BENCH_STEPS" -e BENCH_GPUS="$BENCH_GPUS" \
+                   -- bash -c 'set -e; rm -rf ~/bench; mkdir -p ~/bench; git clone -q "https://github.com/$CI_REPO" ~/bench/main-src; exec bash ~/bench/main-src/.ci/benchmark.sh' \
+                 | jq -r .name)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Submitted $NAME: PR #$BENCH_PR $BENCH_MODE $BENCH_MODEL x$BENCH_STEPS on $BENCH_GPUS GPU(s)"
+
+      - name: Follow the log
+        run: ./minic job logs --follow "${{ steps.submit.outputs.name }}"
+
+      - name: Result
+        if: always() && steps.submit.outputs.name != ''
+        run: |
+          ./minic job status --json "${{ steps.submit.outputs.name }}" > job.json
+          {
+            echo "| job | state | exit | node | started | finished |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '"| \(.name) | \(.state) | \(.exit_code // "-") | \(.node // "-") | \(.started_at // "-") | \(.finished_at // "-") |"' job.json
+          } >> "$GITHUB_STEP_SUMMARY"
+          # what the script left in the job's folder: results.json, the logs, comment.md
+          ./minic job get "${{ steps.submit.outputs.name }}" --dir results || true
+          if [ -f results/comment.md ]; then
+            { echo; cat results/comment.md; } >> "$GITHUB_STEP_SUMMARY"
+            BODY=results/comment.md
+          else
+            printf '<!-- minicloud-benchmark -->\n## MiniCloud benchmark — PR #%s (%s)\n\nThe run ended **%s** before results were written: %s. Log: %s\n' \
+              "${{ steps.cfg.outputs.pr }}" "${{ steps.cfg.outputs.mode }}" "$(jq -r .state job.json)" \
+              "$(jq -r '.detail // "no detail"' job.json)" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > comment.md
+            BODY=comment.md
+          fi
+          # one comment per PR, updated in place
+          R="$GITHUB_REPOSITORY"; N="${{ steps.cfg.outputs.pr }}"
+          ID=$(gh api "repos/$R/issues/$N/comments" --paginate --jq '.[] | select(.body | startswith("<!-- minicloud-benchmark -->")) | .id' | head -1)
+          if [ -n "$ID" ]; then gh api -X PATCH "repos/$R/issues/comments/$ID" -F body=@"$BODY" > /dev/null && echo "updated comment $ID"
+          else gh api -X POST "repos/$R/issues/$N/comments" -F body=@"$BODY" > /dev/null && echo "posted a comment"; fi
+          test "$(jq -r .state job.json)" = succeeded
+
+      - name: Cancel the job when this run is cancelled
+        if: cancelled() && steps.submit.outputs.name != ''
+        run: ./minic job cancel "${{ steps.submit.outputs.name }}" || true
