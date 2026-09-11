@@ -14,4 +14,7 @@ uv pip install -e ".[cuda,test]" --no-build-isolation
 python -c "import torch, flash_attn; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count(), 'flash_attn', flash_attn.__version__)"
 
 export TESTING=true
-pytest tests/gpu_tests -v --tb=short -p no:xdist
+# the JUnit report lands in the job's folder, which MiniCloud keeps with
+# the job's record; the workflow fetches it for the step summary
+pytest tests/gpu_tests -v --tb=short -p no:xdist \
+  ${MINICLOUD_JOB_DIR:+--junitxml "$MINICLOUD_JOB_DIR/junit.xml"}
