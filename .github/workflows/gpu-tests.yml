@@ -82,6 +82,26 @@ jobs:
             echo "|---|---|---|---|---|---|"
             jq -r '"| \(.name) | \(.state) | \(.exit_code // "-") | \(.node // "-") | \(.started_at // "-") | \(.finished_at // "-") |"' job.json
           } >> "$GITHUB_STEP_SUMMARY"
+          # the JUnit report the script left in the job's folder (the runner has
+          # no checkout, so the summary is written here, from the base branch)
+          ./minic job get "${{ steps.submit.outputs.name }}" --dir results || true
+          if [ -f results/junit.xml ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            python3 - results/junit.xml <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          n = lambda k: sum(int(s.get(k, 0)) for s in suites)
+          seconds = sum(float(s.get("time", 0)) for s in suites)
+          print(f"**GPU tests: {n('tests') - n('skipped')} ran, {n('failures')} failed, {n('errors')} errors, {n('skipped')} skipped, {seconds:.0f} s**")
+          bad = [c for s in suites for c in s.iter("testcase") if c.find("failure") is not None or c.find("error") is not None]
+          if bad:
+              print()
+              for c in bad:
+                  print(f"- `{c.get('classname')}::{c.get('name')}`")
+          EOF
+          fi
           test "$(jq -r .state job.json)" = succeeded
 
       - name: Cancel the job when this run is cancelled
