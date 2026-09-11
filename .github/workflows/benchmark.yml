@@ -69,6 +69,7 @@ jobs:
             STEPS="${{ inputs.steps }}"; GPUS="${{ inputs.gpus }}"
           elif [ "${{ github.event_name }}" = push ]; then
             PR=98; MODE=sft; MODEL=Qwen/Qwen2.5-0.5B-Instruct; STEPS=20; GPUS=1   # TEMPORARY
+            HARNESS="${{ github.ref_name }}"                                       # TEMPORARY
           else
             PR="${{ github.event.pull_request.number }}"
             MODE=sft
@@ -77,8 +78,10 @@ jobs:
           fi
           case "$MODE" in sft|osft) ;; *) echo "::error::mode must be sft or osft"; exit 1;; esac
           case "$GPUS" in 1|2|4|8) ;; *) echo "::error::gpus must be 1, 2, 4 or 8"; exit 1;; esac
-          for k in pr mode model steps gpus; do eval "v=\$${k^^}"; echo "$k=$v" >> "$GITHUB_OUTPUT"; done
-          echo "PR #$PR mode=$MODE model=$MODEL steps=$STEPS gpus=$GPUS"
+          # the harness (.ci/benchmark.sh) comes from the default branch, never from the PR
+          HARNESS="${HARNESS:-${{ github.event.repository.default_branch }}}"
+          for k in pr mode model steps gpus harness; do eval "v=\$${k^^}"; echo "$k=$v" >> "$GITHUB_OUTPUT"; done
+          echo "PR #$PR mode=$MODE model=$MODEL steps=$STEPS gpus=$GPUS harness=$HARNESS"
 
       - name: Install minic
         run: curl -fsSL "$MINIC_URL/cli/download/linux/amd64" -o minic && chmod +x minic && ./minic version
@@ -92,11 +95,12 @@ jobs:
           BENCH_MODEL: ${{ steps.cfg.outputs.model }}
           BENCH_STEPS: ${{ steps.cfg.outputs.steps }}
           BENCH_GPUS: ${{ steps.cfg.outputs.gpus }}
+          HARNESS_REF: ${{ steps.cfg.outputs.harness }}
         run: |
           NAME=$(./minic job submit ci-base --gpus "$BENCH_GPUS" --max-hours 2.5 --json \
-                   -e CI_REPO="$CI_REPO" -e BENCH_PR="$BENCH_PR" -e BENCH_MODE="$BENCH_MODE" \
+                   -e CI_REPO="$CI_REPO" -e HARNESS_REF="$HARNESS_REF" -e BENCH_PR="$BENCH_PR" -e BENCH_MODE="$BENCH_MODE" \
                    -e BENCH_MODEL="$BENCH_MODEL" -e BENCH_STEPS="$BENCH_STEPS" -e BENCH_GPUS="$BENCH_GPUS" \
-                   -- bash -c 'set -e; rm -rf ~/bench; mkdir -p ~/bench; git clone -q "https://github.com/$CI_REPO" ~/bench/main-src; exec bash ~/bench/main-src/.ci/benchmark.sh' \
+                   -- bash -c 'set -e; rm -rf ~/bench; mkdir -p ~/bench; git clone -q -b "$HARNESS_REF" "https://github.com/$CI_REPO" ~/bench/main-src; exec bash ~/bench/main-src/.ci/benchmark.sh' \
                  | jq -r .name)
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "Submitted $NAME: PR #$BENCH_PR $BENCH_MODE $BENCH_MODEL x$BENCH_STEPS on $BENCH_GPUS GPU(s)"
