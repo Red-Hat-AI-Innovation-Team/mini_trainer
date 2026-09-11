@@ -16,8 +16,6 @@
 name: benchmark
 
 on:
-  push:
-    branches: [benchmark-workflow]   # TEMPORARY: exercise the workflow before it is on main
   pull_request_target:
     types: [labeled, synchronize, reopened]
   workflow_dispatch:
@@ -48,7 +46,7 @@ jobs:
   benchmark:
     name: benchmark
     if: >-
-      github.event_name == 'workflow_dispatch' || github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'benchmark') ||
       contains(github.event.pull_request.labels.*.name, 'benchmark-osft')
     runs-on: ubuntu-latest
@@ -67,9 +65,6 @@ jobs:
           if [ "${{ github.event_name }}" = workflow_dispatch ]; then
             PR="${{ inputs.pr }}"; MODE="${{ inputs.mode }}"; MODEL="${{ inputs.model }}"
             STEPS="${{ inputs.steps }}"; GPUS="${{ inputs.gpus }}"
-          elif [ "${{ github.event_name }}" = push ]; then
-            PR=98; MODE=sft; MODEL=Qwen/Qwen2.5-0.5B-Instruct; STEPS=20; GPUS=1   # TEMPORARY
-            HARNESS="${{ github.ref_name }}"                                       # TEMPORARY
           else
             PR="${{ github.event.pull_request.number }}"
             MODE=sft
