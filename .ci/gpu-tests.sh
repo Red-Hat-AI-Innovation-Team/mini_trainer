@@ -10,7 +10,6 @@ echo "== $(date -u +%FT%TZ) $(git rev-parse --short HEAD) on $(hostname) =="
 nvidia-smi -L
 
 source ~/venvs/mini_trainer/bin/activate
-export UV_LINK_MODE=copy
 uv pip install -e ".[cuda,test]" --no-build-isolation
 python -c "import torch, flash_attn; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count(), 'flash_attn', flash_attn.__version__)"
 
