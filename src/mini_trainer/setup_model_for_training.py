@@ -415,7 +415,7 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
     return context
 
 
-def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
+def wrap_fsdp2(model: torch.nn.Module, compile_model: bool = False) -> torch.nn.Module:
     """
     Phase 2: Pure FSDP2 wrapping with activation checkpointing.
 
@@ -427,6 +427,8 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     Args:
         model: Model to wrap with FSDP2 (should already have buffers materialized)
+        compile_model: If True, compile each transformer block with torch.compile
+            (fullgraph=True, dynamic=True) between AC wrapping and FSDP2 sharding.
 
     Returns:
         FSDP2-wrapped model
@@ -481,6 +483,12 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
         for idx, block in enumerate(layers):
             # preserve_rng_state needs to be true so that the backward pass can be accurate
             layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
+
+    # Apply torch.compile to each block (after AC, before FSDP2)
+    if compile_model:
+        log_rank_0(f"🔄 [Phase 2] Compiling {len(layers)} transformer blocks with torch.compile")
+        for idx, block in enumerate(layers):
+            layers[idx] = torch.compile(block, fullgraph=True, dynamic=True)
 
     # Build 1D device mesh over all ranks
     world_size = dist.get_world_size()
@@ -1262,11 +1270,6 @@ def setup_model(
             to_print=True,
         )
 
-    # NOTE: Don't enable HuggingFace gradient checkpointing with FSDP2
-    # It causes conflicts. TorchTitan applies PyTorch's checkpoint wrapper
-    # BEFORE FSDP2 wrapping if needed.
-    # model.gradient_checkpointing_enable()
-    # torch.compile(model)
     return model
 
 
@@ -1283,13 +1286,14 @@ def setup_training_components(
     eps: float = 1e-8,
     weight_decay: float = 0.0,
     resume_from_checkpoint: str | None = None,
+    compile_model: bool = False,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
 
     This function orchestrates the three-phase model initialization pipeline:
     1. Phase 1: Prepare model for FSDP2 (extract state dicts, materialize buffers)
-    2. Phase 2: Pure FSDP2 wrapping (activation checkpointing + sharding)
+    2. Phase 2: Pure FSDP2 wrapping (activation checkpointing + compilation + sharding)
     3. Phase 3: Finalize initialization (distribute weights, compute SVD for OSFT)
 
     Args:
@@ -1299,6 +1303,7 @@ def setup_training_components(
         lr_scheduler: Type of learning rate scheduler to use
         num_training_steps: Total number of training steps (required for some schedulers)
         scheduler_kwargs: Additional scheduler-specific keyword arguments
+        compile_model: Whether to compile transformer blocks with torch.compile
 
     Returns:
         Tuple of (wrapped_model, optimizer, lr_scheduler)
@@ -1313,8 +1318,8 @@ def setup_training_components(
     init_context = prepare_model_for_fsdp2(model)
     init_context.resume_from_checkpoint = resume_from_checkpoint
 
-    # Phase 2: Pure FSDP2 wrapping
-    model = wrap_fsdp2(model)
+    # Phase 2: Pure FSDP2 wrapping (+ optional compilation)
+    model = wrap_fsdp2(model, compile_model=compile_model)
 
     # Phase 3: Finalize model initialization (distribute weights)
     model = finalize_model_initialization(model, init_context)
