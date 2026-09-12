@@ -12,7 +12,8 @@
 # copy and runs main's .ci/benchmark.sh, which fetches the PR's head as
 # the code under test. So a PR cannot change the ruler it is measured
 # with. The runner needs the secret MINIC_TOKEN and the variable
-# MINIC_URL, and writes one comment per PR, updated in place.
+# MINIC_URL (both secrets — the runner masks the portal address in the
+# log), and writes one comment per PR, updated in place.
 name: benchmark
 
 on:
@@ -54,7 +55,7 @@ jobs:
     permissions:
       pull-requests: write
     env:
-      MINIC_URL: ${{ vars.MINIC_URL }}
+      MINIC_URL: ${{ secrets.MINIC_URL }}
       MINIC_TOKEN: ${{ secrets.MINIC_TOKEN }}
       MINIC_POLL_MS: "10000"
       GH_TOKEN: ${{ github.token }}
