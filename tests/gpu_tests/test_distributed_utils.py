@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from mini_trainer import device_utils
 from mini_trainer.utils import check_distributed_is_synchronized, init_distributed_environment
 
 
@@ -23,7 +24,7 @@ class TestDistributedUtils:
     )
     @patch("mini_trainer.utils.torch.distributed.get_world_size", return_value=1)
     @patch("mini_trainer.utils.torch.distributed.init_process_group")
-    @patch("mini_trainer.utils.torch.cuda.set_device")
+    @patch("mini_trainer.device_utils.set_device")
     @patch("mini_trainer.utils.check_distributed_is_synchronized")
     @patch("mini_trainer.utils.check_distributed_is_evenly_configured")
     @patch("mini_trainer.utils.torch.distributed.barrier")
@@ -44,7 +45,7 @@ class TestDistributedUtils:
         # Check process group initialization
         mock_init_pg.assert_called_once()
         args, kwargs = mock_init_pg.call_args
-        assert args[0] == "nccl"
+        assert args[0] == device_utils.get_dist_backend()
         assert "timeout" in kwargs
 
         # Check device setting

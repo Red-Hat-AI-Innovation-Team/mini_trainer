@@ -15,6 +15,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_
 from tqdm import tqdm
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
+from mini_trainer import device_utils
 from mini_trainer.fsdp2_lazy_init import FSDP2_LAZY_INIT_OSFT, get_fsdp2_lazy_init_mode, set_fsdp2_lazy_init_mode
 from mini_trainer.gpt_oss_utils import is_gpt_oss_model
 from mini_trainer.utils import get_control_process_group, log_rank_0
@@ -1019,8 +1020,8 @@ def _load_model_memory_efficient(
 
             # Delete base model immediately to free memory
             del base_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if device_utils.is_accelerator_available():
+                device_utils.empty_cache()
 
         # we need this for the pickle
         if not config:
@@ -1275,8 +1276,8 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             # clean up base model
             del base_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if device_utils.is_accelerator_available():
+                device_utils.empty_cache()
 
             log_rank_0("✅ Non-distributed OSFT model loaded successfully")
             return model
@@ -1400,7 +1401,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # Helfpul vars
             current_rank = dist.get_rank()
             local_rank = int(os.getenv("LOCAL_RANK", 0))
-            local_device = torch.device("cuda", local_rank)
+            local_device = device_utils.get_device(local_rank)
             main_proc_rank = 0
             is_main_proc = current_rank == main_proc_rank
             world_size = dist.get_world_size()
@@ -1501,7 +1502,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     work_assignments[target_rank] = None
 
                     # garbage collection
-                    torch.cuda.empty_cache()
+                    device_utils.empty_cache()
                     gc.collect()
 
                 elif target_rank == current_rank:
@@ -1525,7 +1526,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 # clear the old params
                 del param_gpu
                 del param
-                torch.cuda.empty_cache()
+                device_utils.empty_cache()
                 gc.collect()
 
             log_rank_0("✅ [compute_distributed_svd] SVD computation complete, gathering results")
@@ -1553,7 +1554,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     processed_svd_dicts = None
 
                     # empty cache and gc
-                    torch.cuda.empty_cache()
+                    device_utils.empty_cache()
                     gc.collect()
 
                 # main process receives
@@ -1697,7 +1698,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 del p
 
             # empty cache and gc
-            torch.cuda.empty_cache()
+            device_utils.empty_cache()
             gc.collect()
 
         def _pre_fsdp2_wrap_initialize_lazy_osft(self):
@@ -1999,7 +2000,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             # Set up target device for memory-efficient operations
             local_rank = int(os.getenv("LOCAL_RANK", 0))
-            target_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+            target_device = (
+                device_utils.get_device(local_rank) if device_utils.is_accelerator_available() else torch.device("cpu")
+            )
             log_rank_0(f"   • target_device: {target_device}")
 
             osft_params_processed = 0
@@ -2009,8 +2012,8 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     top_k = self.osft_config[name]
 
                     # Memory monitoring before processing
-                    if torch.cuda.is_available():
-                        mem_before = torch.cuda.memory_allocated(target_device) / 1e9
+                    if device_utils.is_accelerator_available():
+                        mem_before = device_utils.memory_allocated(target_device) / 1e9
                         log_rank_0(
                             f"🔄 Processing {name} with incremental GPU usage (top_k={top_k}) - GPU mem: {mem_before:.2f}GB"
                         )
@@ -2034,11 +2037,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                     # Clear the temporary GPU + CPU tensor
                     del param_gpu
-                    torch.cuda.empty_cache()
+                    device_utils.empty_cache()
 
                     # Memory monitoring after processing
-                    if torch.cuda.is_available():
-                        mem_after = torch.cuda.memory_allocated(target_device) / 1e9
+                    if device_utils.is_accelerator_available():
+                        mem_after = device_utils.memory_allocated(target_device) / 1e9
                         log_rank_0(
                             f"✅ Completed {name} - GPU mem: {mem_after:.2f}GB (freed: {mem_before - mem_after:.2f}GB)"
                         )
@@ -2101,7 +2104,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     # Remove original parameter so it doesn't get updated
                     mod._parameters.pop(attr, None)
                     self._record_osft_factor_spec(name, attr)
-                    torch.cuda.empty_cache()
+                    device_utils.empty_cache()
 
                     osft_params_processed += 1
 
@@ -2465,11 +2468,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                 # Clear GPU cache every few parameters to prevent accumulation
                 if (i + 1) % OSFT_CACHE_CLEAR_INTERVAL == 0:
-                    torch.cuda.empty_cache()
+                    device_utils.empty_cache()
                     log_rank_0(f"Processed {i + 1}/{len(self.osft_paramspec_registry)} OSFT parameters")
 
             # Final cleanup
-            torch.cuda.empty_cache()
+            device_utils.empty_cache()
             log_rank_0(f"Finished reconstructing {len(self.osft_paramspec_registry)} OSFT parameters")
 
             return state_dict

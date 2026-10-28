@@ -14,7 +14,7 @@ from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTenso
 from tqdm import tqdm
 from typer import Option, Typer
 
-from mini_trainer import mlflow_wrapper, wandb_wrapper
+from mini_trainer import device_utils, mlflow_wrapper, wandb_wrapper
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.callbacks import CallbackManager
@@ -365,7 +365,7 @@ def compute_validation_loss(model, val_data_loader, device):
                 loss_metrics = loss.detach().item()
 
                 # Clear cache after each minibatch to prevent OOM
-                torch.cuda.empty_cache()
+                device_utils.empty_cache()
 
                 val_batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
@@ -1009,12 +1009,12 @@ def train(
                 "python_rng": random.getstate(),
                 "numpy_rng": np.random.get_state(),
             }
-            if torch.cuda.is_available() and torch.cuda.is_initialized():
-                _rng_snapshot["cuda_rng"] = torch.cuda.get_rng_state()
+            if device_utils.is_initialized():
+                _rng_snapshot["cuda_rng"] = device_utils.get_rng_state()
 
             batch_start_time = time.time()
             batch_totals.reset_batch()
-            torch.cuda.reset_peak_memory_stats()
+            device_utils.reset_peak_memory_stats()
 
             if callback_manager:
                 callback_manager.context.step = step
@@ -1068,7 +1068,7 @@ def train(
                     callback_manager.context.loss = loss_metrics
                     callback_manager.fire("on_after_backward")
 
-                torch.cuda.empty_cache()
+                device_utils.empty_cache()
 
                 batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
@@ -1175,7 +1175,7 @@ def train(
                 "total_samples_accumulated": total_samples_accumulated,
                 "total_tokens_accumulated": total_tokens_processed,
                 "samples_per_second": bm["num_samples"] / batch_time if batch_time > 0 else 0.0,
-                "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
+                "peak_memory_usage_GB": float(device_utils.max_memory_allocated() / 1e9),
                 "val_loss": last_validation_loss,
             }
             # Event-based validation: coalesce step and sample triggers (run at most once per step)

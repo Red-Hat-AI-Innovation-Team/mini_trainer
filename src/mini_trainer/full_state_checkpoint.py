@@ -25,6 +25,8 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
 
+from mini_trainer import device_utils
+
 logger = logging.getLogger(__name__)
 
 # Signals that indicate the training process should checkpoint and exit.
@@ -249,8 +251,8 @@ class FullStateCheckpointer:
             "numpy_rng": np.random.get_state(),
         }
         # CUDA RNG state is only available if CUDA is initialized
-        if torch.cuda.is_available() and torch.cuda.is_initialized():
-            rng_state["cuda_rng"] = torch.cuda.get_rng_state()
+        if device_utils.is_initialized():
+            rng_state["cuda_rng"] = device_utils.get_rng_state()
         torch.save(rng_state, save_dir / f"rng_state_rank_{self._rank}.pt")
 
     @staticmethod
@@ -287,8 +289,8 @@ class FullStateCheckpointer:
         torch.set_rng_state(rng_state["torch_rng"])
         random.setstate(rng_state["python_rng"])
         np.random.set_state(rng_state["numpy_rng"])
-        if "cuda_rng" in rng_state and torch.cuda.is_available():
-            torch.cuda.set_rng_state(rng_state["cuda_rng"])
+        if "cuda_rng" in rng_state and device_utils.is_accelerator_available():
+            device_utils.set_rng_state(rng_state["cuda_rng"])
 
     @staticmethod
     def _extract_local_optim_state(optimizer):

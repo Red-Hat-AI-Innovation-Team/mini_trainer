@@ -126,16 +126,24 @@ class TestModelInitialization:
         assert aligned_model.config.bos_token_id == 1
         assert aligned_model.config.eos_token_id == 2
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.gpu
+    @pytest.mark.skipif(
+        not (torch.cuda.is_available() or (hasattr(torch, "xpu") and torch.xpu.is_available())),
+        reason="No CUDA or XPU accelerator available",
+    )
     @patch("mini_trainer.setup_model_for_training.dist.get_rank", return_value=0)
     @patch("mini_trainer.setup_model_for_training.dist.get_world_size", return_value=1)
     @patch("mini_trainer.setup_model_for_training.dist.is_initialized", return_value=False)
-    def test_wrap_tiny_model_fsdp(self, mock_dist_init, mock_world_size, mock_rank):
-        """Test FSDP wrapping with a tiny model."""
+    def test_wrap_tiny_model_fsdp(self, mock_dist_init, mock_world_size, mock_rank, monkeypatch):
+        """Test FSDP wrapping with a tiny model on the real accelerator (CUDA or XPU)."""
+        from mini_trainer import device_utils
         from mini_trainer.setup_model_for_training import wrap_fsdp2
 
+        # Runs on real hardware, so use real device selection rather than the
+        # CUDA pin conftest applies to mocked unit tests.
+        monkeypatch.delenv("MINI_TRAINER_DEVICE", raising=False)
         model, config = create_tiny_llama_model()
-        model = model.cuda()
+        model = model.to(device_utils.get_device(0))
 
         # Wrap with FSDP2
         with (

@@ -16,6 +16,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from transformers import AutoConfig, AutoTokenizer, Mxfp4Config
 
 import mini_trainer.osft_utils as osft_utils
+from mini_trainer import device_utils
 from mini_trainer.fsdp2_lazy_init import (
     FSDP2_LAZY_INIT_OSFT,
     FSDP2_LAZY_INIT_SFT,
@@ -133,7 +134,7 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
 
     # best-effort local target device per rank
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    default_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+    default_device = device_utils.get_device(local_rank)
 
     def _is_osft_owned_attribute(module: torch.nn.Module, name: str) -> bool:
         if name.startswith("osft_") or name in {"U_low", "S_low", "V_low", "rank_high"}:
@@ -484,7 +485,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     # Build 1D device mesh over all ranks
     world_size = dist.get_world_size()
-    mesh = init_device_mesh("cuda", [world_size], mesh_dim_names=["fsdp"])
+    mesh = init_device_mesh(device_utils.get_device_type(), [world_size], mesh_dim_names=["fsdp"])
 
     # FSDP2 wrap each transformer block
     log_rank_0("🔄 [Phase 2] Wrapping transformer blocks with FSDP2")
@@ -563,7 +564,7 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
         del sd
         context.state_dict = None
         # Ensures no residual data is still being allocated by Pytorch
-        torch.cuda.empty_cache()
+        device_utils.empty_cache()
         gc.collect()
 
         log_rank_0("✅ [SFT] State dict distributed successfully")
@@ -925,8 +926,8 @@ def setup_sft_model_distributed(
             # Clean up immediately to free memory
             if "cpu_model" in locals():
                 del cpu_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if device_utils.is_accelerator_available():
+                device_utils.empty_cache()
             log_rank_0("state dict and buffers extracted, model deleted")
 
     # Broadcast config and buffer_dict to all ranks
@@ -1044,6 +1045,16 @@ def setup_model(
     if _needs_sdpa:
         base_model_args["attn_implementation"] = "sdpa"
         log_rank_0(f"Using SDPA for {model_name_or_path} (model incompatible with Flash Attention 2)")
+    elif device_utils.get_device_type() == "xpu":
+        if is_gpt_oss:
+            # GPT-OSS needs flash-attn3 (attention sinks), which has no XPU build
+            base_model_args["attn_implementation"] = "eager"
+            log_rank_0("GPT-OSS: flash-attn3 is not available on Intel XPU. Using eager attention instead.")
+        else:
+            # flash_attn is CUDA-only; the hub kernel has XPU builds (SDPA if it can't load).
+            # Both keep padding-free packed sequences isolated through position_ids.
+            base_model_args["attn_implementation"] = device_utils.xpu_flash_attn_implementation()
+            log_rank_0(f"Using {base_model_args['attn_implementation']} for {model_name_or_path} on Intel XPU")
     else:
         # Check if flash_attn is available for non-SDPA models
         try:

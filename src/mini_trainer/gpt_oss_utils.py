@@ -11,6 +11,7 @@ import re
 import torch
 from transformers import AutoConfig, PretrainedConfig
 
+from mini_trainer import device_utils
 from mini_trainer.utils import log_rank_0
 
 logger = logging.getLogger("mini_trainer")
@@ -268,7 +269,9 @@ def convert_dequantized_to_quantized_format_correct(
             logger.info(f"   📤 Moving {param_name} to GPU for fast quantization")
 
             # Move to GPU (parameters come from CPU after FSDP extraction)
-            param_gpu = param_tensor.cuda() if param_tensor.device.type == "cpu" else param_tensor
+            param_gpu = (
+                param_tensor.to(device_utils.get_device()) if param_tensor.device.type == "cpu" else param_tensor
+            )
 
             # Use OpenAI's exact dimensional mapping discovered through reverse engineering
             # OpenAI's format: dequant[expert, row, col] -> blocks[expert, col, block_idx, byte_idx]
@@ -354,7 +357,7 @@ def convert_dequantized_to_quantized_format_correct(
             # OPTIMIZATION: Aggressive GPU memory cleanup after each parameter (reference repo pattern)
             del param_gpu, tensor_transposed, reshaped_for_quant
             del all_blocks_flat, all_scales_flat, blocks_u8, scales_i8, scales_u8
-            torch.cuda.empty_cache()
+            device_utils.empty_cache()
             logger.info(f"   🧹 GPU memory cleared after processing {param_name}")
         except Exception as e:
             logger.error(f"❌ Failed to convert {param_name}: {e}")

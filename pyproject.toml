@@ -47,6 +47,9 @@ cuda = [
     "kernels",  # for flash-attention-3
     "mamba-ssm[causal-conv1d]>=2.2.5"
 ]
+xpu = [
+    "kernels",  # flash-attention kernel with Intel XPU builds
+]
 test = [
     "pytest>=7.0",
     "pytest-cov",

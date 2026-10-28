@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 
+from mini_trainer import device_utils
 from mini_trainer.utils import log_rank_0
 
 
@@ -329,8 +330,8 @@ def extract_causal_lm_from_vlm(model_path: str, load_kwargs: dict) -> nn.Module:
         raise ValueError(f"Cannot extract lm_head from {type(vlm).__name__}")
 
     del vlm
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if device_utils.is_accelerator_available():
+        device_utils.empty_cache()
 
     # Dequantize FP8 weights if present — FSDP rejects scalar parameters
     # like weight_scale_inv that come from FP8 quantized models.

@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from mini_trainer import device_utils
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -49,21 +51,21 @@ def skip_if_no_flash_attn(flash_attn_available):
 
 @pytest.fixture(autouse=True)
 def reset_cuda_memory():
-    """Reset CUDA memory before and after each test."""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+    """Reset accelerator (CUDA/XPU) memory before and after each test."""
+    if device_utils.is_accelerator_available():
+        device_utils.empty_cache()
+        device_utils.reset_peak_memory_stats()
     yield
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if device_utils.is_accelerator_available():
+        device_utils.empty_cache()
 
 
 @pytest.fixture
 def single_gpu_device():
-    """Provide a single GPU device for testing."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    return torch.device("cuda:0")
+    """Provide a single accelerator (CUDA or XPU) device for testing."""
+    if not device_utils.is_accelerator_available():
+        pytest.skip("No CUDA or XPU accelerator available")
+    return device_utils.get_device(0)
 
 
 @pytest.fixture

@@ -14,6 +14,8 @@ from torch.distributed import is_initialized
 from transformers import AutoConfig
 from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 
+from mini_trainer import device_utils
+
 _CONTROL_PROCESS_GROUP = None
 
 
@@ -26,7 +28,13 @@ def get_control_process_group():
         if not dist.is_initialized():
             raise RuntimeError("Distributed process group must be initialized before creating control group")
         ranks = list(range(dist.get_world_size()))
-        _CONTROL_PROCESS_GROUP = dist.new_group(ranks=ranks, backend="gloo")
+        # new_group inherits the default group's bound device. Gloo can serve a
+        # CUDA-bound group but has no XPU support, so pair it with XCCL there;
+        # CPU control tensors still go through Gloo.
+        backend = "gloo"
+        if device_utils.get_device_type() == "xpu":
+            backend = f"cpu:gloo,xpu:{device_utils.get_dist_backend()}"
+        _CONTROL_PROCESS_GROUP = dist.new_group(ranks=ranks, backend=backend)
     return _CONTROL_PROCESS_GROUP
 
 
@@ -85,7 +93,7 @@ def check_distributed_is_synchronized():
     is functioning properly and all processes are synchronized.
     """
     local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device("cuda", local_rank)
+    device = device_utils.get_device(local_rank)
     t = torch.tensor([1]).to(device, torch.int32)
 
     # Here, every process group increments the counter
@@ -114,7 +122,7 @@ def check_distributed_is_evenly_configured():
             f"world_size ({world_size}) is not cleanly divisible by local_world_size ({local_world_size}). Each node must have the same number of GPUs."
         )
 
-    device = torch.device("cuda", local_rank)
+    device = device_utils.get_device(local_rank)
     max_local_rank_seen = torch.tensor([local_rank], dtype=torch.int32, device=device)
     dist.all_reduce(max_local_rank_seen, op=dist.ReduceOp.MAX)
     if max_local_rank_seen[0] != local_world_size - 1:
@@ -125,12 +133,14 @@ def check_distributed_is_evenly_configured():
 
 def init_distributed_environment():
     local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device("cuda", local_rank)
-    torch.distributed.init_process_group("nccl", timeout=timedelta(minutes=180), device_id=device)
+    device = device_utils.get_device(local_rank)
+    torch.distributed.init_process_group(
+        device_utils.get_dist_backend(), timeout=timedelta(minutes=180), device_id=device
+    )
     # NOTE(osilkin): PyTorch wants us to avoid this API in favor of setting the device explicitly
     # through `init_process_group`, but without setting this, FSDP2 will shard the
     # entire model onto the first GPU. I haven't yet figured out a solution to this.
-    torch.cuda.set_device(local_rank)
+    device_utils.set_device(local_rank)
     check_distributed_is_synchronized()
     check_distributed_is_evenly_configured()
     log_rank_0("✅ Torch distributed appears to be functioning correctly")
@@ -198,4 +208,4 @@ def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    device_utils.manual_seed_all(seed)

@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
+from mini_trainer import device_utils
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.utils import patch_target_module
 
@@ -69,7 +70,7 @@ class TestMixedPrecisionDtypes:
             os.environ["LOCAL_RANK"] = "0"
             os.environ["MASTER_ADDR"] = "localhost"
             os.environ["MASTER_PORT"] = "12355"
-            dist.init_process_group(backend="nccl", rank=0, world_size=1)
+            dist.init_process_group(backend=device_utils.get_dist_backend(), rank=0, world_size=1)
 
         try:
             # Create tiny model

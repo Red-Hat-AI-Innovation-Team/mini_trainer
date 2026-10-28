@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 
 def pytest_configure(config):
     """Configure pytest with custom settings."""
+    config.addinivalue_line("markers", "gpu: requires a real accelerator, CUDA or XPU (deselect with '-m \"not gpu\"')")
     # Set multiprocessing start method to 'spawn' for better compatibility
     # This is crucial for avoiding segmentation faults in DataLoader tests
     if sys.platform != "win32":
@@ -28,6 +29,17 @@ def pytest_configure(config):
         torch.cuda.manual_seed_all(42)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+@pytest.fixture(autouse=True)
+def pin_cuda_code_path_for_unit_tests(request, monkeypatch):
+    """Keep CPU unit tests on the CUDA code path, as on a CPU-only CI host.
+
+    These tests mock ``torch.cuda`` and expect it to be used. On an Intel XPU
+    host mini_trainer would otherwise select XPU. gpu_tests see the real device.
+    """
+    if "gpu_tests" not in request.node.nodeid:
+        monkeypatch.setenv("MINI_TRAINER_DEVICE", "cuda")
 
 
 @pytest.fixture(autouse=True)
